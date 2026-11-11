@@ -28,6 +28,10 @@ final class TelemetryProtocol {
     private long lastFragmentNanos;
     private boolean accepted, qos, peerObserved;
     private int reportsSent;
+    private ServiceCapabilities capabilities;
+    private WifiServiceSwitch service;
+    private int serviceForwardingSequence = 2;
+    private long now;
 
     TelemetryProtocol(int session, int anchor, Observer observer) {
         this.session = session;
@@ -38,6 +42,37 @@ final class TelemetryProtocol {
     }
 
     boolean accepted() { return accepted; }
+
+    void enableCapabilityRead(String identity) { capabilities = new ServiceCapabilities(identity); }
+
+    byte[] nextCapabilityQuery(int sequence, long now) {
+        if (!qos || capabilities == null) return null;
+        byte[] query = capabilities.nextQuery(sequence, 1, now);
+        return query == null ? null : windowDatagram(query);
+    }
+
+    boolean beginServiceSwitch(int sequence, long now) {
+        if (service != null || capabilities.state(now) != ServiceCapabilities.State.SUPPORTED) return false;
+        service = capabilities.newSwitch(sequence);
+        return true;
+    }
+
+    WifiServiceSwitch.Packet nextServicePacket(long now) {
+        return service == null || capabilities.state(now) != ServiceCapabilities.State.SUPPORTED
+            ? null : service.next(now);
+    }
+
+    byte[] serviceDatagram(WifiServiceSwitch.Packet packet) {
+        return windowDatagram(capabilities.wrapService(packet.frame(), serviceForwardingSequence++));
+    }
+
+    void servicePacketSent(WifiServiceSwitch.Packet packet, long now) { service.sent(packet, now); }
+
+    WifiServiceSwitch.State serviceState(long now) { return service == null ? null : service.state(now); }
+
+    ServiceCapabilities.State capabilityState(long now) {
+        return capabilities.state(now);
+    }
 
     byte[] open() {
         byte[] tail = SYN_TAIL.clone();
@@ -78,7 +113,10 @@ final class TelemetryProtocol {
         return data.array();
     }
 
-    void receive(byte[] data) {
+    void receive(byte[] data) { receive(data, 0); }
+
+    void receive(byte[] data, long now) {
+        this.now = now;
         if (data.length < 8 || data.length > 1472 || word(data, 0) != (0x8000 | data.length)
                 || word(data, 2) != session || xor(data) != u(data[7])) return;
         int type = u(data[6]);
@@ -246,10 +284,17 @@ final class TelemetryProtocol {
             int innerLength = word(frame, 12) & 1023;
             int trailer = 11 + innerLength;
             if (innerLength < 13 || frame.length != trailer + 22 + 2
-                    || (frame[trailer + 4] & 15) != 2
-                    || word(frame, trailer + 9) != 0xffff || word(frame, trailer + 11) != 0xffff) return;
+                    || (frame[trailer + 4] & 15) != 2) return;
+            int source = ServiceCapabilities.integer(frame, trailer);
+            int destination = ServiceCapabilities.integer(frame, trailer + 9);
             frame = Arrays.copyOfRange(frame, 11, trailer);
-            if (!validFrame(frame) || !plaintextPush(frame[8])) return;
+            if (!validFrame(frame)) return;
+            if (qos && capabilities != null) {
+                capabilities.receive(frame, source, destination, now);
+                if (service != null && capabilities.state(now) == ServiceCapabilities.State.SUPPORTED
+                        && capabilities.fromBoundPeer(source, destination)) service.receive(frame, now);
+            }
+            if (destination != -1 || !plaintextPush(frame[8])) return;
             forwarded = true;
         }
         if (frame[4] != 3 || frame[9] != 3) return;

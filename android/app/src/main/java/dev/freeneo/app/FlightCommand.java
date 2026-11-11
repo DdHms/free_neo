@@ -27,7 +27,10 @@ record FlightCommand(Action action, int sequence) {
     }
 
     byte[] forward(int localHash, int peerHash, int forwardingSequence) {
-        byte[] inner = request();
+        return forwardFrame(request(), localHash, peerHash, forwardingSequence);
+    }
+
+    static byte[] forwardFrame(byte[] inner, int localHash, int peerHash, int forwardingSequence) {
         byte[] payload = ByteBuffer.allocate(inner.length + 22).order(ByteOrder.LITTLE_ENDIAN)
             .put(inner).putInt(localHash).put((byte) 2).putInt(forwardingSequence)
             .putInt(peerHash).put((byte) 1).put((byte) 0x82).array();

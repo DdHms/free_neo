@@ -20,16 +20,20 @@ app saves these values on the phone. The eight-second probe binds its UDP socket
 to the drone's Wi-Fi and displays fresh received battery, flight and motor
 state when available. The probe opens a DJI transport session, sends receive
 acknowledgements, and reports an app-local identity when the aircraft accepts
-QoS transport. DJI flight-control negotiation and aircraft commands are pending. Android telemetry has been tested with a recorded session and still
+QoS transport. It reads the bound Neo 2 peer’s advertised Wi-Fi command
+capability. **Check flight service (ground only)** additionally attempts the bilateral
+service activation exchange. Live aircraft commands are pending. Android telemetry has been tested with a recorded session and still
 needs a live phone test. Automatic landing remains unverified on the aircraft.
 
 Run the simulator, pairing, and telemetry tests with JDK 17 from this directory.
 
 ```sh
 classes=$(mktemp -d)
-javac --release 17 -d "$classes" app/src/main/java/dev/freeneo/app/{FlightSimulation,PairingExchange,TelemetryProtocol,FlightCommand}.java tests/*.java
+javac --release 17 -d "$classes" app/src/main/java/dev/freeneo/app/{FlightSimulation,PairingExchange,TelemetryProtocol,FlightCommand,ServiceCapabilities,WifiServiceSwitch}.java tests/*.java
 java -cp "$classes" dev.freeneo.app.FlightSimulationTest
 java -cp "$classes" dev.freeneo.app.PairingExchangeTest
 java -cp "$classes" dev.freeneo.app.TelemetryProtocolTest
 java -cp "$classes" dev.freeneo.app.FlightCommandTest
+java -cp "$classes" dev.freeneo.app.ServiceCapabilitiesTest
+java -cp "$classes" dev.freeneo.app.WifiServiceSwitchTest
 ```

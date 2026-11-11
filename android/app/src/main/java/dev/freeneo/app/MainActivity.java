@@ -111,7 +111,8 @@ public final class MainActivity extends Activity {
         hostInput.setText(endpoint.getString("host", ""));
         portInput.setText(endpoint.getString("port", ""));
         telemetryStatus = label(page, "Connect to drone Wi-Fi to read telemetry.");
-        button(page, "Read telemetry", this::readTelemetry);
+        button(page, "Read telemetry", () -> readTelemetry(false));
+        button(page, "Check flight service (ground only)", () -> readTelemetry(true));
 
         label(page, "Flight simulator").setTextSize(20);
         simulationStatus = label(page, "");
@@ -151,7 +152,7 @@ public final class MainActivity extends Activity {
         return field;
     }
 
-    private void readTelemetry() {
+    private void readTelemetry(boolean checkService) {
         var network = drone.network();
         if (network == null) {
             telemetryStatus.setText("Connect to drone Wi-Fi first.");
@@ -181,14 +182,14 @@ public final class MainActivity extends Activity {
         getSharedPreferences("drone-endpoint", MODE_PRIVATE).edit()
             .putString("host", hostText).putString("port", portText).apply();
         int generation = probeGeneration;
-        telemetryStatus.setText("Opening a read-only DJI session…");
+        telemetryStatus.setText(checkService ? "Checking DJI Wi-Fi service activation…" : "Opening a read-only DJI session…");
         var identities = getSharedPreferences("wifi-session", MODE_PRIVATE);
         String identity = identities.getString("identity", null);
         if (identity == null) {
             identity = UUID.randomUUID().toString().replace("-", "");
             identities.edit().putString("identity", identity).apply();
         }
-        probe = new TelemetryProbe(network, host, port, identity, message -> handler.post(() -> {
+        probe = new TelemetryProbe(network, host, port, identity, checkService, message -> handler.post(() -> {
             if (generation == probeGeneration) telemetryStatus.setText(message);
         }));
         probe.start();
