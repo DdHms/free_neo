@@ -43,6 +43,7 @@ final class DroneConnection {
     private PairingExchange exchange;
     private boolean writing;
     private ConnectivityManager.NetworkCallback wifi;
+    private Network droneNetwork;
 
     DroneConnection(Context context, Handler handler, Consumer<String> status) {
         this.context = context;
@@ -215,7 +216,9 @@ final class DroneConnection {
                 .build();
             wifi = new ConnectivityManager.NetworkCallback() {
                 @Override public void onAvailable(Network network) {
-                    if (wifi == this) status.accept("Drone Wi-Fi connected. Telemetry is unavailable in this build.");
+                    if (wifi != this) return;
+                    droneNetwork = network;
+                    status.accept("Drone Wi-Fi connected.");
                 }
 
                 @Override public void onUnavailable() {
@@ -244,7 +247,10 @@ final class DroneConnection {
         status.accept(message);
     }
 
+    Network network() { return droneNetwork; }
+
     void close() {
+        droneNetwork = null;
         handler.removeCallbacks(pairingTimeout);
         exchange = null;
         writer = null;

@@ -12,16 +12,21 @@ The flight simulator also works without Bluetooth hardware.
 - **Flight simulator** lets you connect, arm, take off, and land in memory.
   Leaving the app resets the simulator.
 
-The Android pairing and Wi-Fi flow still needs physical device validation.
-Wi-Fi association is distinct from DJI UDP session negotiation, which is pending
-along with live telemetry. The app has no aircraft flight command path.
-Automatic landing remains unverified on the real aircraft.
+With the aircraft on the ground and its Wi-Fi connected, enter the drone IPv4
+address and UDP port from your local settings and tap **Read telemetry**. The
+app saves these values on the phone. The eight-second probe binds its UDP socket
+to the drone's Wi-Fi and displays fresh received battery, flight and motor
+state when available. The probe opens a DJI transport session and sends receive
+acknowledgements. It does not negotiate DJI flight control or send aircraft
+commands. Android telemetry has been tested with a recorded session and still
+needs a live phone test. Automatic landing remains unverified on the aircraft.
 
-Run the simulator and pairing transcript tests with JDK 17 from this directory.
+Run the simulator, pairing, and telemetry tests with JDK 17 from this directory.
 
 ```sh
 classes=$(mktemp -d)
-javac --release 17 -d "$classes" app/src/main/java/dev/freeneo/app/{FlightSimulation,PairingExchange}.java tests/*.java
+javac --release 17 -d "$classes" app/src/main/java/dev/freeneo/app/{FlightSimulation,PairingExchange,TelemetryProtocol}.java tests/*.java
 java -cp "$classes" dev.freeneo.app.FlightSimulationTest
 java -cp "$classes" dev.freeneo.app.PairingExchangeTest
+java -cp "$classes" dev.freeneo.app.TelemetryProtocolTest
 ```

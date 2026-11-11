@@ -9,16 +9,22 @@ import android.bluetooth.le.ScanCallback;
 import android.bluetooth.le.ScanRecord;
 import android.bluetooth.le.ScanResult;
 import android.content.pm.PackageManager;
+import android.net.ConnectivityManager;
+import android.net.InetAddresses;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.ParcelUuid;
+import android.text.InputType;
 import android.widget.Button;
+import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
+import java.net.Inet4Address;
+import java.net.InetAddress;
 import java.util.HashSet;
 import java.util.Locale;
 import java.util.Set;
@@ -33,6 +39,10 @@ public final class MainActivity extends Activity {
     private BluetoothLeScanner scanner;
     private ScanCallback activeScan;
     private DroneConnection drone;
+    private TelemetryProbe probe;
+    private EditText hostInput, portInput;
+    private TextView telemetryStatus;
+    private int probeGeneration;
     private final Runnable scanTimeout = () -> finishScan(
         seen.isEmpty() ? "No Neo 2 advertisements found." : "Select a device to connect.");
     private LinearLayout results;
@@ -60,14 +70,27 @@ public final class MainActivity extends Activity {
         label(page, "Aircraft discovery").setTextSize(20);
         discoveryStatus = label(page, "Scan for a nearby Neo 2.");
         scan = button(page, "Scan for Neo 2", this::requestScan);
-        drone = new DroneConnection(this, handler, discoveryStatus::setText);
+        drone = new DroneConnection(this, handler, message -> {
+            discoveryStatus.setText(message);
+            if (drone.network() == null) stopProbe();
+        });
         button(page, "Disconnect drone", () -> {
+            stopProbe();
             drone.close();
             discoveryStatus.setText("Drone disconnected.");
         });
         results = new LinearLayout(this);
         results.setOrientation(LinearLayout.VERTICAL);
         page.addView(results);
+
+        label(page, "Aircraft telemetry").setTextSize(20);
+        hostInput = field(page, "Drone IPv4 address", InputType.TYPE_CLASS_PHONE);
+        portInput = field(page, "Drone UDP port", InputType.TYPE_CLASS_NUMBER);
+        var endpoint = getSharedPreferences("drone-endpoint", MODE_PRIVATE);
+        hostInput.setText(endpoint.getString("host", ""));
+        portInput.setText(endpoint.getString("port", ""));
+        telemetryStatus = label(page, "Connect to drone Wi-Fi to read telemetry.");
+        button(page, "Read telemetry", this::readTelemetry);
 
         label(page, "Flight simulator").setTextSize(20);
         simulationStatus = label(page, "");
@@ -85,6 +108,61 @@ public final class MainActivity extends Activity {
             renderSimulation();
         });
         renderSimulation();
+    }
+
+    private EditText field(LinearLayout parent, String hint, int inputType) {
+        EditText field = new EditText(this);
+        field.setHint(hint);
+        field.setSingleLine();
+        field.setInputType(inputType);
+        parent.addView(field);
+        return field;
+    }
+
+    private void readTelemetry() {
+        var network = drone.network();
+        if (network == null) {
+            telemetryStatus.setText("Connect to drone Wi-Fi first.");
+            return;
+        }
+        stopProbe();
+        String hostText = hostInput.getText().toString().trim();
+        String portText = portInput.getText().toString().trim();
+        InetAddress host;
+        int port;
+        try {
+            host = InetAddresses.parseNumericAddress(hostText);
+            port = Integer.parseInt(portText);
+            if (!(host instanceof Inet4Address) || host.isAnyLocalAddress() || host.isLoopbackAddress()
+                    || host.isMulticastAddress() || port < 1 || port > 65535) throw new IllegalArgumentException();
+        } catch (IllegalArgumentException error) {
+            telemetryStatus.setText("Enter a valid drone IPv4 address and UDP port.");
+            return;
+        }
+        var connectivity = getSystemService(ConnectivityManager.class);
+        var properties = connectivity.getLinkProperties(network);
+        if (properties == null || properties.getRoutes().stream()
+                .noneMatch(route -> !route.hasGateway() && route.matches(host))) {
+            telemetryStatus.setText("The address is outside the drone Wi-Fi subnet.");
+            return;
+        }
+        getSharedPreferences("drone-endpoint", MODE_PRIVATE).edit()
+            .putString("host", hostText).putString("port", portText).apply();
+        int generation = probeGeneration;
+        telemetryStatus.setText("Opening a read-only DJI session…");
+        probe = new TelemetryProbe(network, host, port, message -> handler.post(() -> {
+            if (generation == probeGeneration) telemetryStatus.setText(message);
+        }));
+        probe.start();
+    }
+
+    private void stopProbe() {
+        probeGeneration++;
+        if (probe != null) {
+            probe.close();
+            probe = null;
+        }
+        telemetryStatus.setText("Read telemetry to start a new probe.");
     }
 
     private TextView label(LinearLayout parent, String text) {
@@ -147,6 +225,7 @@ public final class MainActivity extends Activity {
 
     private void startScan() {
         stopScan();
+        stopProbe();
         drone.close();
         results.removeAllViews();
         seen.clear();
@@ -220,6 +299,7 @@ public final class MainActivity extends Activity {
 
     @Override protected void onStop() {
         started = false;
+        stopProbe();
         if (activeScan != null) discoveryStatus.setText("Scan stopped. Scan again to continue.");
         stopScan();
         handler.removeCallbacks(simulatedHandshake);

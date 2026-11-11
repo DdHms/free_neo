@@ -141,8 +141,12 @@ final class PairingExchange {
         return frame;
     }
 
-    private static int crc(byte[] data, int length, int value, int polynomial) {
-        for (int i = 0; i < length; i++) {
+    static int crc(byte[] data, int length, int value, int polynomial) {
+        return crc(data, 0, length, value, polynomial);
+    }
+
+    static int crc(byte[] data, int offset, int length, int value, int polynomial) {
+        for (int i = offset; i < offset + length; i++) {
             value ^= u(data[i]);
             for (int bit = 0; bit < 8; bit++) {
                 value = (value >>> 1) ^ ((value & 1) == 0 ? 0 : polynomial);
