@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "neo2-vision"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = ["bleak>=0.22,<4"]
+
+[project.optional-dependencies]
+session = ["neo2-control @ git+https://github.com/smichea/dji-neo2-lan-client.git@a80e3e14b96aaa32b9e625c0229c53c45187f930"]
+
+[project.scripts]
+neo2-discover = "neo2_vision.discovery:main"
+neo2-wifi-scan = "neo2_vision.wifi:main"
+neo2-observe = "neo2_vision.wifi_session:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"neo2_vision.vendor" = ["NEO2_LICENSE.txt"]
