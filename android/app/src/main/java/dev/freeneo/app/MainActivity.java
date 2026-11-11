@@ -3,15 +3,13 @@ package dev.freeneo.app;
 import android.Manifest;
 import android.app.Activity;
 import android.bluetooth.BluetoothDevice;
-import android.bluetooth.BluetoothGatt;
-import android.bluetooth.BluetoothGattCallback;
 import android.bluetooth.BluetoothManager;
-import android.bluetooth.BluetoothProfile;
 import android.bluetooth.le.BluetoothLeScanner;
 import android.bluetooth.le.ScanCallback;
 import android.bluetooth.le.ScanRecord;
 import android.bluetooth.le.ScanResult;
 import android.content.pm.PackageManager;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -24,22 +22,19 @@ import android.widget.TextView;
 import java.util.HashSet;
 import java.util.Locale;
 import java.util.Set;
-import java.util.UUID;
+import java.util.ArrayList;
 
 public final class MainActivity extends Activity {
     private static final int NEARBY_REQUEST = 1;
     private static final long SCAN_MS = 8_000;
-    private static final long GATT_MS = 12_000;
-    private static final UUID SERVICE = UUID.fromString("0000fff0-0000-1000-8000-00805f9b34fb");
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final FlightSimulation simulation = new FlightSimulation();
     private final Set<BluetoothDevice> seen = new HashSet<>();
     private BluetoothLeScanner scanner;
     private ScanCallback activeScan;
-    private BluetoothGatt activeGatt;
+    private DroneConnection drone;
     private final Runnable scanTimeout = () -> finishScan(
-        seen.isEmpty() ? "No Neo 2 advertisements found." : "Select a device to check its Bluetooth service.");
-    private final Runnable gattTimeout = () -> finishGatt("Bluetooth service check timed out.");
+        seen.isEmpty() ? "No Neo 2 advertisements found." : "Select a device to connect.");
     private LinearLayout results;
     private TextView discoveryStatus;
     private TextView simulationStatus;
@@ -65,6 +60,11 @@ public final class MainActivity extends Activity {
         label(page, "Aircraft discovery").setTextSize(20);
         discoveryStatus = label(page, "Scan for a nearby Neo 2.");
         scan = button(page, "Scan for Neo 2", this::requestScan);
+        drone = new DroneConnection(this, handler, discoveryStatus::setText);
+        button(page, "Disconnect drone", () -> {
+            drone.close();
+            discoveryStatus.setText("Drone disconnected.");
+        });
         results = new LinearLayout(this);
         results.setOrientation(LinearLayout.VERTICAL);
         page.addView(results);
@@ -118,28 +118,36 @@ public final class MainActivity extends Activity {
         land.setEnabled(state == FlightSimulation.State.AIRBORNE);
     }
 
-    private boolean hasNearbyPermissions() {
-        return checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED
-            && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED;
+    private String[] missingPermissions() {
+        var needed = new ArrayList<String>();
+        for (String permission : new String[] {Manifest.permission.BLUETOOTH_SCAN,
+                Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.NEARBY_WIFI_DEVICES}) {
+            if (permission.equals(Manifest.permission.NEARBY_WIFI_DEVICES) && Build.VERSION.SDK_INT < 33) continue;
+            if (checkSelfPermission(permission) != PackageManager.PERMISSION_GRANTED) needed.add(permission);
+        }
+        if (Build.VERSION.SDK_INT < 33 && checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            needed.add(Manifest.permission.ACCESS_COARSE_LOCATION);
+            needed.add(Manifest.permission.ACCESS_FINE_LOCATION);
+        }
+        return needed.toArray(new String[0]);
     }
 
     private void requestScan() {
-        if (hasNearbyPermissions()) startScan();
-        else requestPermissions(new String[] {
-            Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT
-        }, NEARBY_REQUEST);
+        String[] missing = missingPermissions();
+        if (missing.length == 0) startScan();
+        else requestPermissions(missing, NEARBY_REQUEST);
     }
 
     @Override public void onRequestPermissionsResult(int request, String[] permissions, int[] grants) {
         super.onRequestPermissionsResult(request, permissions, grants);
         if (request != NEARBY_REQUEST || !started) return;
-        if (hasNearbyPermissions()) startScan();
-        else discoveryStatus.setText("Allow Nearby devices access to scan.");
+        if (missingPermissions().length == 0) startScan();
+        else discoveryStatus.setText("Allow Bluetooth and Wi-Fi permissions to discover and connect.");
     }
 
     private void startScan() {
         stopScan();
-        closeGatt();
+        drone.close();
         results.removeAllViews();
         seen.clear();
         var manager = getSystemService(BluetoothManager.class);
@@ -175,12 +183,15 @@ public final class MainActivity extends Activity {
         if (record == null) return;
         String name = record.getDeviceName();
         boolean serviceAdvertised = record.getServiceUuids() != null
-            && record.getServiceUuids().contains(new ParcelUuid(SERVICE));
+            && record.getServiceUuids().contains(new ParcelUuid(DroneConnection.SERVICE));
         boolean neoName = name != null && name.toUpperCase(Locale.ROOT).startsWith("DJI-NEO2-");
         BluetoothDevice device = result.getDevice();
         if ((!neoName && !serviceAdvertised) || !seen.add(device)) return;
         String displayName = neoName ? name : "Possible Neo 2 (" + seen.size() + ")";
-        button(results, "Check " + displayName, () -> checkDevice(device));
+        button(results, "Connect to " + displayName, () -> {
+            stopScan();
+            drone.connect(device);
+        });
     }
 
     private void stopScan() {
@@ -202,61 +213,6 @@ public final class MainActivity extends Activity {
         discoveryStatus.setText(message);
     }
 
-    private void checkDevice(BluetoothDevice device) {
-        stopScan();
-        closeGatt();
-        discoveryStatus.setText("Checking Bluetooth service…");
-        try {
-            activeGatt = device.connectGatt(this, false, new BluetoothGattCallback() {
-                @Override public void onConnectionStateChange(BluetoothGatt gatt, int status, int state) {
-                    runOnUiThread(() -> {
-                        if (gatt != activeGatt) return;
-                        if (status != BluetoothGatt.GATT_SUCCESS || state == BluetoothProfile.STATE_DISCONNECTED) {
-                            finishGatt("Bluetooth connection ended before the service check.");
-                        } else if (state == BluetoothProfile.STATE_CONNECTED) {
-                            try {
-                                if (!gatt.discoverServices()) finishGatt("Could not start Bluetooth service discovery.");
-                            } catch (SecurityException error) {
-                                finishGatt("Nearby devices access was removed.");
-                            }
-                        }
-                    });
-                }
-
-                @Override public void onServicesDiscovered(BluetoothGatt gatt, int status) {
-                    runOnUiThread(() -> {
-                        if (gatt != activeGatt) return;
-                        if (status != BluetoothGatt.GATT_SUCCESS) finishGatt("Bluetooth service discovery failed.");
-                        else if (gatt.getService(SERVICE) == null) finishGatt("Neo 2 Bluetooth service was not found.");
-                        else finishGatt("Bluetooth service found. DJI pairing and Wi-Fi are pending.");
-                    });
-                }
-            }, BluetoothDevice.TRANSPORT_LE);
-            if (activeGatt == null) finishGatt("Could not start Bluetooth connection.");
-            else handler.postDelayed(gattTimeout, GATT_MS);
-        } catch (SecurityException | IllegalStateException error) {
-            finishGatt("Bluetooth connection unavailable. Check Bluetooth and Nearby devices access.");
-        }
-    }
-
-    private void closeGatt() {
-        handler.removeCallbacks(gattTimeout);
-        BluetoothGatt previous = activeGatt;
-        activeGatt = null;
-        if (previous != null) {
-            try {
-                previous.close();
-            } catch (SecurityException ignored) {
-                // The permission may have been revoked while connected.
-            }
-        }
-    }
-
-    private void finishGatt(String message) {
-        closeGatt();
-        discoveryStatus.setText(message);
-    }
-
     @Override protected void onStart() {
         super.onStart();
         started = true;
@@ -264,14 +220,16 @@ public final class MainActivity extends Activity {
 
     @Override protected void onStop() {
         started = false;
-        if (activeScan != null || activeGatt != null) {
-            discoveryStatus.setText("Bluetooth check stopped. Scan again to continue.");
-        }
+        if (activeScan != null) discoveryStatus.setText("Scan stopped. Scan again to continue.");
         stopScan();
-        closeGatt();
-        handler.removeCallbacksAndMessages(null);
+        handler.removeCallbacks(simulatedHandshake);
         simulation.reset();
         renderSimulation();
         super.onStop();
+    }
+
+    @Override protected void onDestroy() {
+        drone.close();
+        super.onDestroy();
     }
 }
