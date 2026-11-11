@@ -18,9 +18,9 @@ With the aircraft on the ground and its Wi-Fi connected, enter the drone IPv4
 address and UDP port from your local settings and tap **Read telemetry**. The
 app saves these values on the phone. The eight-second probe binds its UDP socket
 to the drone's Wi-Fi and displays fresh received battery, flight and motor
-state when available. The probe opens a DJI transport session and sends receive
-acknowledgements. It does not negotiate DJI flight control or send aircraft
-commands. Android telemetry has been tested with a recorded session and still
+state when available. The probe opens a DJI transport session, sends receive
+acknowledgements, and reports an app-local identity when the aircraft accepts
+QoS transport. DJI flight-control negotiation and aircraft commands are pending. Android telemetry has been tested with a recorded session and still
 needs a live phone test. Automatic landing remains unverified on the aircraft.
 
 Run the simulator, pairing, and telemetry tests with JDK 17 from this directory.

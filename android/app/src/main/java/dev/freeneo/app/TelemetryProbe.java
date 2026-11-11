@@ -17,6 +17,7 @@ final class TelemetryProbe implements AutoCloseable {
     private final Network network;
     private final InetAddress host;
     private final int port;
+    private final String identity;
     private final Consumer<String> status;
     private volatile boolean closed;
     private volatile DatagramSocket socket;
@@ -24,10 +25,11 @@ final class TelemetryProbe implements AutoCloseable {
     private boolean flying, motorsOn;
     private int battery;
 
-    TelemetryProbe(Network network, InetAddress host, int port, Consumer<String> status) {
+    TelemetryProbe(Network network, InetAddress host, int port, String identity, Consumer<String> status) {
         this.network = network;
         this.host = host;
         this.port = port;
+        this.identity = identity;
         this.status = status;
     }
 
@@ -58,10 +60,17 @@ final class TelemetryProbe implements AutoCloseable {
             var packet = new DatagramPacket(new byte[1473], 1473);
             long start = SystemClock.elapsedRealtime();
             long nextAck = start, nextStatus = start;
+            int reportSequence = random.nextInt(1, 65533);
             while (!closed && SystemClock.elapsedRealtime() - start < 8_000) {
                 long now = SystemClock.elapsedRealtime();
                 if (protocol.accepted() && now >= nextAck) {
-                    send(link, protocol.acknowledge());
+                    byte[] report = protocol.nextIdentityReport(identity, port, reportSequence);
+                    if (report == null) {
+                        send(link, protocol.acknowledge());
+                    } else {
+                        send(link, report);
+                        reportSequence++;
+                    }
                     nextAck = now + 20;
                 }
                 if (now >= nextStatus) {

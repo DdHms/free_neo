@@ -28,6 +28,7 @@ import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.util.HashSet;
 import java.util.Locale;
+import java.util.UUID;
 import java.util.Set;
 import java.util.ArrayList;
 
@@ -181,7 +182,13 @@ public final class MainActivity extends Activity {
             .putString("host", hostText).putString("port", portText).apply();
         int generation = probeGeneration;
         telemetryStatus.setText("Opening a read-only DJI session…");
-        probe = new TelemetryProbe(network, host, port, message -> handler.post(() -> {
+        var identities = getSharedPreferences("wifi-session", MODE_PRIVATE);
+        String identity = identities.getString("identity", null);
+        if (identity == null) {
+            identity = UUID.randomUUID().toString().replace("-", "");
+            identities.edit().putString("identity", identity).apply();
+        }
+        probe = new TelemetryProbe(network, host, port, identity, message -> handler.post(() -> {
             if (generation == probeGeneration) telemetryStatus.setText(message);
         }));
         probe.start();

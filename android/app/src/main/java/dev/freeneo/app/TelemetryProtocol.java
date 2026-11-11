@@ -26,7 +26,8 @@ final class TelemetryProtocol {
     private final byte[] stream = new byte[2496];
     private int used;
     private long lastFragmentNanos;
-    private boolean accepted;
+    private boolean accepted, qos, peerObserved;
+    private int reportsSent;
 
     TelemetryProtocol(int session, int anchor, Observer observer) {
         this.session = session;
@@ -45,11 +46,27 @@ final class TelemetryProtocol {
         return datagram(0, tail);
     }
 
-    byte[] acknowledge() {
-        var body = buffer(154);
+    byte[] acknowledge() { return windowDatagram(new byte[0]); }
+
+    byte[] nextIdentityReport(String identity, int port, int sequence) {
+        if (!qos || reportsSent >= (peerObserved ? 3 : 1)) return null;
+        boolean wifiReport = reportsSent == 2;
+        byte[] report = new byte[wifiReport ? 31 : 24];
+        report[0] = 1;
+        report[1] = (byte) port;
+        report[2] = (byte) (port >>> 8);
+        if (wifiReport) report[3] = 4;
+        byte[] serial = identity.getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+        System.arraycopy(serial, 0, report, wifiReport ? 7 : 4, Math.min(19, serial.length));
+        reportsSent++;
+        return windowDatagram(PairingExchange.frame(2, wifiReport ? 0x1b : 7, sequence, 0x40, 0x93, report));
+    }
+
+    private byte[] windowDatagram(byte[] payload) {
+        var body = buffer(154 + payload.length);
         video.encode(body);
         protocol.encode(body);
-        body.putShort((short) anchor).putShort((short) anchor).putInt(0).putShort((short) 0);
+        body.putShort((short) anchor).putShort((short) anchor).putInt(0).putShort((short) payload.length).put(payload);
         return datagram(4, Arrays.copyOf(body.array(), body.position()));
     }
 
@@ -67,6 +84,7 @@ final class TelemetryProtocol {
         int type = u(data[6]);
         if (!accepted) {
             accepted = type == 0 && data.length == 15 && data[8] == 1 && (word(data, 9) & ~15) == 0;
+            qos = accepted && (word(data, 9) & 2) != 0;
             return;
         }
         if (type == 1 && data.length >= 34) {
@@ -217,6 +235,10 @@ final class TelemetryProtocol {
     }
 
     private void inspect(byte[] frame) {
+        if (frame[4] == 7 && frame[5] == 2 && frame[9] == 7 && u(frame[10]) == 0x94
+                && frame.length >= 44 && (frame[11] & 31) != 0 && frame[14] == 2) {
+            peerObserved = true;
+        }
         if (!plaintextPush(frame[8])) return;
         boolean forwarded = false;
         if (u(frame[4]) == 0x27 && u(frame[5]) == 0xee && frame[9] == 0x51 && frame[10] == 1) {
