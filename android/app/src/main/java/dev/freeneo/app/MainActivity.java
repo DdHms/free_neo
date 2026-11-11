@@ -16,6 +16,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.ParcelUuid;
+import android.os.SystemClock;
 import android.text.InputType;
 import android.widget.Button;
 import android.widget.EditText;
@@ -48,11 +49,30 @@ public final class MainActivity extends Activity {
     private LinearLayout results;
     private TextView discoveryStatus;
     private TextView simulationStatus;
-    private Button scan, connect, arm, takeOff, land;
+    private Button scan, connect, arm, takeOff, land, confirmLanding, loseLink;
+    private boolean simulatedLinkDown;
+    private final Runnable simulatedTouchdown = () -> {
+        simulation.observeLanding(false, false);
+        renderSimulation();
+    };
+    private final Runnable simulatedConfirmationRequest = () -> {
+        simulation.requestFinalConfirmation();
+        renderSimulation();
+    };
+    private final Runnable simulationTick = new Runnable() {
+        @Override public void run() {
+            long now = SystemClock.elapsedRealtime();
+            if (!simulatedLinkDown) simulation.heartbeat(now);
+            simulation.checkLink(now);
+            renderSimulation();
+            if (simulation.state() != FlightSimulation.State.LINK_LOST) {
+                handler.postDelayed(this, 100);
+            }
+        }
+    };
     private boolean started;
     private final Runnable simulatedHandshake = () -> {
-        simulation.connected();
-        renderSimulation();
+        if (simulation.connected(SystemClock.elapsedRealtime())) simulationTick.run();
     };
 
     @Override protected void onCreate(Bundle savedInstanceState) {
@@ -101,12 +121,23 @@ public final class MainActivity extends Activity {
         });
         arm = button(page, "Arm simulator", () -> { simulation.arm(); renderSimulation(); });
         takeOff = button(page, "Simulate takeoff", () -> { simulation.takeOff(); renderSimulation(); });
-        land = button(page, "Simulate landing", () -> { simulation.land(); renderSimulation(); });
-        button(page, "Reset simulator", () -> {
-            handler.removeCallbacks(simulatedHandshake);
-            simulation.reset();
+        land = button(page, "Simulate landing", () -> {
+            if (!simulation.land()) return;
+            renderSimulation();
+            handler.postDelayed(simulatedConfirmationRequest, 600);
+        });
+        confirmLanding = button(page, "Confirm simulated landing", () -> {
+            if (!simulation.confirmLanding()) return;
+            renderSimulation();
+            handler.postDelayed(simulatedTouchdown, 900);
+        });
+        loseLink = button(page, "Simulate link loss", () -> {
+            simulatedLinkDown = true;
+            handler.removeCallbacks(simulatedConfirmationRequest);
+            handler.removeCallbacks(simulatedTouchdown);
             renderSimulation();
         });
+        button(page, "Reset simulator", this::resetSimulation);
         renderSimulation();
     }
 
@@ -181,19 +212,36 @@ public final class MainActivity extends Activity {
         return view;
     }
 
+    private void resetSimulation() {
+        handler.removeCallbacks(simulatedHandshake);
+        handler.removeCallbacks(simulationTick);
+        handler.removeCallbacks(simulatedConfirmationRequest);
+        handler.removeCallbacks(simulatedTouchdown);
+        simulatedLinkDown = false;
+        simulation.reset();
+        renderSimulation();
+    }
+
     private void renderSimulation() {
         FlightSimulation.State state = simulation.state();
-        simulationStatus.setText(switch (state) {
+        simulationStatus.setText(simulatedLinkDown && state != FlightSimulation.State.LINK_LOST
+            ? "Simulated heartbeat interrupted. Waiting for the watchdog." : switch (state) {
             case DISCONNECTED -> "Simulator disconnected";
             case CONNECTING -> "Simulating connection";
             case GROUNDED -> "Simulated aircraft on the ground";
             case ARMED -> "Simulated aircraft armed";
             case AIRBORNE -> "Simulated aircraft airborne";
+            case LANDING -> "Simulated landing in progress";
+            case AWAITING_CONFIRMATION -> "Simulated aircraft requests final landing confirmation";
+            case LINK_LOST -> "Simulated watchdog detected link loss. Flight state unknown.";
         });
         connect.setEnabled(state == FlightSimulation.State.DISCONNECTED);
-        arm.setEnabled(state == FlightSimulation.State.GROUNDED);
-        takeOff.setEnabled(state == FlightSimulation.State.ARMED);
-        land.setEnabled(state == FlightSimulation.State.AIRBORNE);
+        arm.setEnabled(!simulatedLinkDown && state == FlightSimulation.State.GROUNDED);
+        takeOff.setEnabled(!simulatedLinkDown && state == FlightSimulation.State.ARMED);
+        land.setEnabled(!simulatedLinkDown && state == FlightSimulation.State.AIRBORNE);
+        confirmLanding.setEnabled(!simulatedLinkDown && state == FlightSimulation.State.AWAITING_CONFIRMATION);
+        loseLink.setEnabled(!simulatedLinkDown && state != FlightSimulation.State.DISCONNECTED
+            && state != FlightSimulation.State.CONNECTING);
     }
 
     private String[] missingPermissions() {
@@ -302,9 +350,7 @@ public final class MainActivity extends Activity {
         stopProbe();
         if (activeScan != null) discoveryStatus.setText("Scan stopped. Scan again to continue.");
         stopScan();
-        handler.removeCallbacks(simulatedHandshake);
-        simulation.reset();
-        renderSimulation();
+        resetSimulation();
         super.onStop();
     }
 

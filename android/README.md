@@ -9,8 +9,10 @@ The flight simulator also works without Bluetooth hardware.
   to run DJI Bluetooth pairing. If the aircraft signals a pairing request,
   follow its power-button prompt. Approve Android's Wi-Fi prompt to join the
   aircraft's local network. Use **Disconnect drone** to release the connection.
-- **Flight simulator** lets you connect, arm, take off, and land in memory.
-  Leaving the app resets the simulator.
+- **Flight simulator** lets you connect, arm, take off, request landing, and
+  confirm landing in memory. **Simulate link loss** stops simulated heartbeats.
+  The simulated watchdog disables flight controls after its timeout and shows
+  that aircraft state is unknown. Leaving the app resets the simulator.
 
 With the aircraft on the ground and its Wi-Fi connected, enter the drone IPv4
 address and UDP port from your local settings and tap **Read telemetry**. The
