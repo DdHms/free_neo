@@ -27,8 +27,9 @@ Run the simulator, pairing, and telemetry tests with JDK 17 from this directory.
 
 ```sh
 classes=$(mktemp -d)
-javac --release 17 -d "$classes" app/src/main/java/dev/freeneo/app/{FlightSimulation,PairingExchange,TelemetryProtocol}.java tests/*.java
+javac --release 17 -d "$classes" app/src/main/java/dev/freeneo/app/{FlightSimulation,PairingExchange,TelemetryProtocol,FlightCommand}.java tests/*.java
 java -cp "$classes" dev.freeneo.app.FlightSimulationTest
 java -cp "$classes" dev.freeneo.app.PairingExchangeTest
 java -cp "$classes" dev.freeneo.app.TelemetryProtocolTest
+java -cp "$classes" dev.freeneo.app.FlightCommandTest
 ```

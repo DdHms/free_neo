@@ -122,6 +122,11 @@ final class PairingExchange {
     }
 
     static byte[] frame(int sender, int receiver, int sequence, int type, int command, byte[] payload) {
+        return frame(sender, receiver, sequence, type, 7, command, payload);
+    }
+
+    static byte[] frame(int sender, int receiver, int sequence, int type, int commandSet, int command,
+                        byte[] payload) {
         byte[] frame = new byte[13 + payload.length];
         frame[0] = 0x55;
         frame[1] = (byte) frame.length;
@@ -132,7 +137,7 @@ final class PairingExchange {
         frame[6] = (byte) sequence;
         frame[7] = (byte) (sequence >> 8);
         frame[8] = (byte) type;
-        frame[9] = 7;
+        frame[9] = (byte) commandSet;
         frame[10] = (byte) command;
         System.arraycopy(payload, 0, frame, 11, payload.length);
         int checksum = crc(frame, frame.length - 2, 0x3692, 0x8408);
