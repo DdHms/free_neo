@@ -2,6 +2,7 @@ package dev.freeneo.app;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothManager;
 import android.bluetooth.le.BluetoothLeScanner;
@@ -34,6 +35,8 @@ import java.util.ArrayList;
 
 public final class MainActivity extends Activity {
     private static final int NEARBY_REQUEST = 1;
+    private static final String NEO2_HOST = "192.168.2.1";
+    private static final int NEO2_PORT = 9003;
     private static final long SCAN_MS = 8_000;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final FlightSimulation simulation = new FlightSimulation();
@@ -44,6 +47,7 @@ public final class MainActivity extends Activity {
     private TelemetryProbe probe;
     private EditText hostInput, portInput;
     private TextView telemetryStatus;
+    private Button liveTakeoff, liveLand, liveConfirm;
     private int probeGeneration;
     private final Runnable scanTimeout = () -> finishScan(
         seen.isEmpty() ? "No Neo 2 advertisements found." : "Select a device to connect.");
@@ -105,14 +109,22 @@ public final class MainActivity extends Activity {
         page.addView(results);
 
         label(page, "Aircraft telemetry").setTextSize(20);
-        hostInput = field(page, "Drone IPv4 address", InputType.TYPE_CLASS_PHONE);
-        portInput = field(page, "Drone UDP port", InputType.TYPE_CLASS_NUMBER);
+        hostInput = field(page, "Drone IPv4 override (optional)", InputType.TYPE_CLASS_PHONE);
+        portInput = field(page, "Drone UDP port override (optional)", InputType.TYPE_CLASS_NUMBER);
         var endpoint = getSharedPreferences("drone-endpoint", MODE_PRIVATE);
         hostInput.setText(endpoint.getString("host", ""));
         portInput.setText(endpoint.getString("port", ""));
         telemetryStatus = label(page, "Connect to drone Wi-Fi to read telemetry.");
-        button(page, "Read telemetry", () -> readTelemetry(false));
-        button(page, "Check flight service (ground only)", () -> readTelemetry(true));
+        button(page, "Read telemetry", () -> readTelemetry(TelemetryProbe.Mode.READ));
+        button(page, "Check flight service (ground only)", () -> readTelemetry(TelemetryProbe.Mode.CHECK_SERVICE));
+        button(page, "Open flight controls", () -> readTelemetry(TelemetryProbe.Mode.LIVE));
+        liveTakeoff = button(page, "Take off", () -> confirmFlight(FlightCommand.Action.TAKEOFF,
+            "Take off?", "Confirm the aircraft is on the ground, the area is clear, and independent controls are ready."));
+        liveLand = button(page, "Land", () -> requestFlight(FlightCommand.Action.LAND));
+        liveConfirm = button(page, "Confirm landing area is clear", () -> confirmFlight(
+            FlightCommand.Action.CONFIRM_LANDING, "Confirm landing?",
+            "Check the landing area visually. Confirm only if the surface is safe and the area is clear."));
+        renderLiveControls(LiveFlight.Controls.DISABLED);
 
         label(page, "Flight simulator").setTextSize(20);
         simulationStatus = label(page, "");
@@ -152,7 +164,7 @@ public final class MainActivity extends Activity {
         return field;
     }
 
-    private void readTelemetry(boolean checkService) {
+    private void readTelemetry(TelemetryProbe.Mode mode) {
         var network = drone.network();
         if (network == null) {
             telemetryStatus.setText("Connect to drone Wi-Fi first.");
@@ -161,38 +173,84 @@ public final class MainActivity extends Activity {
         stopProbe();
         String hostText = hostInput.getText().toString().trim();
         String portText = portInput.getText().toString().trim();
+        var connectivity = getSystemService(ConnectivityManager.class);
+        var properties = connectivity.getLinkProperties(network);
+        if (properties == null) {
+            telemetryStatus.setText("Waiting for drone Wi-Fi network settings. Try again.");
+            return;
+        }
+        var routes = properties.getRoutes();
         InetAddress host;
         int port;
         try {
-            host = InetAddresses.parseNumericAddress(hostText);
-            port = Integer.parseInt(portText);
+            if (hostText.isEmpty()) {
+                InetAddress expected = InetAddresses.parseNumericAddress(NEO2_HOST);
+                if (routes.stream().anyMatch(route -> !route.hasGateway() && route.matches(expected))) {
+                    host = expected;
+                } else {
+                    var gateways = routes.stream().filter(route -> route.isDefaultRoute() && route.hasGateway())
+                        .map(route -> route.getGateway()).filter(address -> address instanceof Inet4Address)
+                        .filter(address -> routes.stream().anyMatch(route -> !route.hasGateway() && route.matches(address)))
+                        .distinct().collect(java.util.stream.Collectors.toList());
+                    if (gateways.size() != 1) {
+                        telemetryStatus.setText("Could not find the drone IPv4 address on its Wi-Fi. Enter an override.");
+                        return;
+                    }
+                    host = gateways.get(0);
+                }
+            } else {
+                host = InetAddresses.parseNumericAddress(hostText);
+            }
+            port = portText.isEmpty() ? NEO2_PORT : Integer.parseInt(portText);
             if (!(host instanceof Inet4Address) || host.isAnyLocalAddress() || host.isLoopbackAddress()
                     || host.isMulticastAddress() || port < 1 || port > 65535) throw new IllegalArgumentException();
         } catch (IllegalArgumentException error) {
-            telemetryStatus.setText("Enter a valid drone IPv4 address and UDP port.");
+            telemetryStatus.setText("Enter a valid IPv4 address and UDP port, or clear the overrides.");
             return;
         }
-        var connectivity = getSystemService(ConnectivityManager.class);
-        var properties = connectivity.getLinkProperties(network);
-        if (properties == null || properties.getRoutes().stream()
-                .noneMatch(route -> !route.hasGateway() && route.matches(host))) {
+        if (routes.stream().noneMatch(route -> !route.hasGateway() && route.matches(host))) {
             telemetryStatus.setText("The address is outside the drone Wi-Fi subnet.");
             return;
         }
         getSharedPreferences("drone-endpoint", MODE_PRIVATE).edit()
             .putString("host", hostText).putString("port", portText).apply();
         int generation = probeGeneration;
-        telemetryStatus.setText(checkService ? "Checking DJI Wi-Fi service activation…" : "Opening a read-only DJI session…");
+        telemetryStatus.setText((switch (mode) {
+            case READ -> "Opening a read-only DJI session…";
+            case CHECK_SERVICE -> "Checking DJI Wi-Fi service activation…";
+            case LIVE -> "Opening a DJI flight session…";
+        }) + "\n" + host.getHostAddress() + ":" + port);
         var identities = getSharedPreferences("wifi-session", MODE_PRIVATE);
         String identity = identities.getString("identity", null);
         if (identity == null) {
             identity = UUID.randomUUID().toString().replace("-", "");
             identities.edit().putString("identity", identity).apply();
         }
-        probe = new TelemetryProbe(network, host, port, identity, checkService, message -> handler.post(() -> {
+        probe = new TelemetryProbe(network, host, port, identity, mode, message -> handler.post(() -> {
             if (generation == probeGeneration) telemetryStatus.setText(message);
+        }), controls -> handler.post(() -> {
+            if (generation == probeGeneration) renderLiveControls(controls);
         }));
         probe.start();
+    }
+
+    private void renderLiveControls(LiveFlight.Controls controls) {
+        liveTakeoff.setEnabled(controls.takeoff());
+        liveLand.setEnabled(controls.land());
+        liveConfirm.setEnabled(controls.confirm());
+    }
+
+    private void requestFlight(FlightCommand.Action action) {
+        if (probe != null) probe.request(action);
+    }
+
+    private void confirmFlight(FlightCommand.Action action, String title, String message) {
+        int generation = probeGeneration;
+        new AlertDialog.Builder(this).setTitle(title).setMessage(message)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Confirm", (dialog, which) -> {
+                if (generation == probeGeneration) requestFlight(action);
+            }).show();
     }
 
     private void stopProbe() {
@@ -201,6 +259,7 @@ public final class MainActivity extends Activity {
             probe.close();
             probe = null;
         }
+        renderLiveControls(LiveFlight.Controls.DISABLED);
         telemetryStatus.setText("Read telemetry to start a new probe.");
     }
 
