@@ -2,23 +2,31 @@ package dev.freeneo.app;
 
 import android.net.Network;
 import android.os.SystemClock;
+import android.util.Log;
 
 import java.io.IOException;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
+import java.net.PortUnreachableException;
 import java.net.SocketTimeoutException;
 import java.util.Arrays;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Consumer;
+import java.util.concurrent.atomic.AtomicReference;
 
-/** An eight-second observer bound to the Android network acquired for the drone. */
+/** Owns the DJI session on the Android network acquired for the drone. */
 final class TelemetryProbe implements AutoCloseable {
     private final Network network;
     private final InetAddress host;
     private final int port;
     private final String identity;
-    private final boolean checkService;
+    enum Mode { READ, CHECK_SERVICE, LIVE }
+    private record Intent(FlightCommand.Action action, long queuedAt) {}
+    private final Mode mode;
+    private final Consumer<LiveFlight.Controls> controls;
+    private final LiveFlight flight = new LiveFlight();
+    private final AtomicReference<Intent> intent = new AtomicReference<>();
     private final Consumer<String> status;
     private volatile boolean closed;
     private volatile DatagramSocket socket;
@@ -26,16 +34,24 @@ final class TelemetryProbe implements AutoCloseable {
     private boolean flying, motorsOn;
     private int battery;
 
-    TelemetryProbe(Network network, InetAddress host, int port, String identity, boolean checkService, Consumer<String> status) {
+    TelemetryProbe(Network network, InetAddress host, int port, String identity, Mode mode, Consumer<String> status,
+                   Consumer<LiveFlight.Controls> controls) {
         this.network = network;
         this.host = host;
         this.port = port;
         this.identity = identity;
-        this.checkService = checkService;
+        this.mode = mode;
+        this.controls = controls;
         this.status = status;
     }
 
     void start() { new Thread(this::run, "neo2-telemetry").start(); }
+
+    void request(FlightCommand.Action action) {
+        if (!closed && mode == Mode.LIVE) {
+            intent.compareAndSet(null, new Intent(action, SystemClock.elapsedRealtime()));
+        }
+    }
 
     private void run() {
         var random = ThreadLocalRandom.current();
@@ -47,36 +63,82 @@ final class TelemetryProbe implements AutoCloseable {
                     lastFlight = SystemClock.elapsedRealtime();
                 }
 
+                @Override public void flightEvidence(boolean inFlight, boolean motors) {
+                    flight.observe(inFlight, motors, SystemClock.elapsedRealtime());
+                }
+
+                @Override public void landingConfirmation(boolean needed) {
+                    flight.confirmation(needed, SystemClock.elapsedRealtime());
+                }
+
+                @Override public void flightReply(byte[] frame) { flight.reply(frame); }
+
                 @Override public void battery(int percent) {
                     battery = percent;
                     lastBattery = SystemClock.elapsedRealtime();
                 }
             });
         protocol.enableCapabilityRead(identity);
+        String endpoint = host.getHostAddress() + ":" + port;
+        String step = "opening UDP socket";
         try (var link = new DatagramSocket()) {
             socket = link;
             if (closed) return;
+            step = "binding UDP socket to drone Wi-Fi";
             network.bindSocket(link);
+            step = "connecting UDP socket";
             link.connect(host, port);
             link.setSoTimeout(20);
-            send(link, protocol.open());
             var packet = new DatagramPacket(new byte[1473], 1473);
             long start = SystemClock.elapsedRealtime();
-            long nextAck = start, nextStatus = start;
+            long nextOpen = start, nextAck = start, nextStatus = start;
+            long nextHeartbeat = start + 800, nextPresence = start;
+            int opens = 0, presenceCounter = 0;
+            int presenceNonce = random.nextInt(1, 65536);
             int reportSequence = random.nextInt(1, 65533);
-            while (!closed && SystemClock.elapsedRealtime() - start < 8_000) {
+            while (!closed && ((mode == Mode.LIVE && protocol.accepted()) || SystemClock.elapsedRealtime() - start < 8_000)) {
                 long now = SystemClock.elapsedRealtime();
+                if (!protocol.accepted() && opens < 4 && now >= nextOpen) {
+                    step = "sending DJI session request";
+                    send(link, protocol.open());
+                    opens++;
+                    nextOpen = now + 500;
+                }
                 if (protocol.accepted() && now >= nextAck) {
-                    byte[] report = protocol.nextIdentityReport(identity, port, reportSequence);
-                    if (report == null) report = protocol.nextCapabilityQuery(reportSequence, now);
+                    step = "sending DJI session data";
+                    if (protocol.qos() && now >= nextPresence) {
+                        send(link, protocol.presence(presenceNonce, presenceCounter++));
+                        nextPresence = now + 500;
+                    }
+                    if (protocol.qos() && now >= nextHeartbeat) {
+                        send(link, protocol.heartbeat(reportSequence++ & 0xffff));
+                        nextHeartbeat = now + 500;
+                    }
+                    byte[] report = protocol.nextIdentityReport(identity, port, reportSequence & 0xffff);
+                    if (report == null && presenceCounter >= 3) {
+                        report = protocol.nextCapabilityQuery(reportSequence & 0xffff, now);
+                    }
                     if (report != null) {
                         send(link, report);
                         reportSequence++;
                     } else {
-                        if (checkService && protocol.beginServiceSwitch(reportSequence, now)) reportSequence += 2;
+                        if (mode != Mode.READ && protocol.beginServiceSwitch(reportSequence & 0xffff, now)) reportSequence += 2;
                         var servicePacket = protocol.nextServicePacket(now);
-                        if (servicePacket == null) send(link, protocol.acknowledge());
-                        else {
+                        if (servicePacket == null) {
+                            Intent requested = intent.getAndSet(null);
+                            FlightCommand command = requested == null || now - requested.queuedAt() > 250
+                                ? null : flight.begin(requested.action(),
+                                    (reportSequence + (requested.action() == FlightCommand.Action.LAND ? 1 : 0)) & 0xffff,
+                                    protocol.commandReady(now), now);
+                            if (command == null) send(link, protocol.acknowledge());
+                            else {
+                                if (command.action() == FlightCommand.Action.LAND) {
+                                    send(link, protocol.flightDatagram(FlightCommand.neutral(reportSequence & 0xffff), now));
+                                }
+                                reportSequence = (command.sequence() + 1) & 0xffff;
+                                send(link, protocol.flightDatagram(command.request(), now));
+                            }
+                        } else {
                             send(link, protocol.serviceDatagram(servicePacket));
                             protocol.servicePacketSent(servicePacket, SystemClock.elapsedRealtime());
                         }
@@ -84,11 +146,14 @@ final class TelemetryProbe implements AutoCloseable {
                     nextAck = now + 20;
                 }
                 if (now >= nextStatus) {
+                    if (mode == Mode.LIVE) controls.accept(flight.controls(protocol.commandReady(now), now));
                     if (protocol.accepted()) status.accept(summary(now) + "\n" + capabilityStatus(protocol.capabilityState(now))
-                        + (checkService ? serviceStatus(protocol.serviceState(now)) : ""));
+                        + (mode != Mode.READ ? serviceStatus(protocol.serviceState(now)) : "")
+                        + (mode == Mode.LIVE ? "\n" + flight.message() : "") + "\n" + endpoint);
                     nextStatus = now + 250;
                 }
                 try {
+                    step = protocol.accepted() ? "receiving DJI session data" : "waiting for DJI session response";
                     packet.setLength(packet.getData().length);
                     link.receive(packet);
                     protocol.receive(Arrays.copyOf(packet.getData(), packet.getLength()), SystemClock.elapsedRealtime());
@@ -97,16 +162,28 @@ final class TelemetryProbe implements AutoCloseable {
                 }
             }
             if (!closed) {
-                if (!protocol.accepted()) status.accept("No DJI session response. Check the configured address and port.");
-                else if (checkService) status.accept("Service check ended." + serviceStatus(
-                    protocol.serviceState(SystemClock.elapsedRealtime())));
+                if (!protocol.accepted()) status.accept("No DJI session response from " + endpoint + ".");
+                else if (mode == Mode.CHECK_SERVICE) {
+                    long now = SystemClock.elapsedRealtime();
+                    status.accept("Service check ended at " + endpoint + ".\n" + summary(now) + "\n"
+                        + capabilityStatus(protocol.capabilityState(now)) + serviceStatus(protocol.serviceState(now)));
+                }
                 else if (lastFlight < 0 && lastBattery < 0) status.accept("DJI session accepted. No telemetry received.");
                 else status.accept("Telemetry probe ended. Tap Read telemetry to refresh.");
             }
-        } catch (IOException | SecurityException error) {
-            if (!closed) status.accept("Telemetry connection failed on the drone’s Wi-Fi.");
+        } catch (IOException | SecurityException | IllegalStateException error) {
+            if (!closed) {
+                Log.w("FreeNeo", "Failed " + step + " at " + endpoint, error);
+                String detail = error instanceof PortUnreachableException
+                    ? "UDP port unreachable" : error.getClass().getSimpleName() + ": " + error.getMessage();
+                status.accept("Failed " + step + " at " + endpoint + ".\n" + detail
+                    + (mode == Mode.LIVE && protocol.accepted()
+                        ? "\nCheck the aircraft using independent controls." : ""));
+            }
         } finally {
+            closed = true;
             socket = null;
+            if (mode == Mode.LIVE) controls.accept(LiveFlight.Controls.DISABLED);
         }
     }
 

@@ -13,7 +13,7 @@ final class ServiceCapabilities {
     private final int localHash;
     private final byte[] local = new byte[23];
     private byte[] peer;
-    private int peerHash, boot, querySequence;
+    private int peerHash, boot, querySequence, peerCommandMode;
     private long seenAt, sentAt;
     private State state = State.WAITING_FOR_PEER;
 
@@ -27,6 +27,16 @@ final class ServiceCapabilities {
 
     WifiServiceSwitch newSwitch(int sequence) { return new WifiServiceSwitch(local, peer, sequence); }
 
+    byte[] presence(int nonce, int counter, int forwardingSequence) {
+        var body = ByteBuffer.allocate(55).order(ByteOrder.LITTLE_ENDIAN);
+        body.put((byte) 5).put(local).put(new byte[] {4, 4, 4});
+        body.position(33);
+        body.put(new byte[] {0, 0, 1, 0, 0, 1}).putInt(counter);
+        body.putShort(49, (short) nonce).put(51, (byte) 4);
+        byte[] frame = PairingExchange.frame(0xee, 0xe9, 0, 0, 0x51, 0x13, body.array());
+        return FlightCommand.forwardFrame(frame, localHash, -1, forwardingSequence);
+    }
+
     byte[] wrapService(byte[] frame, int forwardingSequence) {
         return FlightCommand.forwardFrame(frame, localHash, peerHash, forwardingSequence);
     }
@@ -34,6 +44,12 @@ final class ServiceCapabilities {
     boolean fromBoundPeer(int source, int destination) {
         return peer != null && source == peerHash && destination == localHash;
     }
+
+    boolean commandRouteReady(long now) {
+        return state(now) == State.SUPPORTED && peerCommandMode >= 4 && peerCommandMode <= 7;
+    }
+
+    boolean fromBoundBroadcast(int source) { return peer != null && source == peerHash; }
 
     State state(long now) {
         if (peer != null && now - seenAt >= 2_000
@@ -77,6 +93,7 @@ final class ServiceCapabilities {
                 boot = generation;
                 state = State.QUERY_PENDING;
             }
+            peerCommandMode = frame[35] & 255;
             seenAt = now;
         } else if (state == State.AWAITING_REPLY && frame[10] == 0x41 && (type == 0x80 || type == 0xc0)
                 && source == peerHash && word(frame, 6) == querySequence) {

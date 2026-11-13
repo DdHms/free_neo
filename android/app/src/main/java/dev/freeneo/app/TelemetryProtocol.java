@@ -6,11 +6,14 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
 
-/** Bounded SWUDP receive-only subset of the pinned Neo 2 reference transport. */
+/** Bounded SWUDP subset of the pinned Neo 2 reference transport. */
 final class TelemetryProtocol {
     interface Observer {
         void flight(boolean flying, boolean motorsOn);
         void battery(int percent);
+        default void flightEvidence(boolean flying, boolean motorsOn) {}
+        default void landingConfirmation(boolean needed) {}
+        default void flightReply(byte[] frame) {}
     }
 
     private static final byte[] SYN_TAIL = {
@@ -43,12 +46,24 @@ final class TelemetryProtocol {
 
     boolean accepted() { return accepted; }
 
+    boolean qos() { return qos; }
+
+    byte[] heartbeat(int sequence) {
+        return windowDatagram(PairingExchange.frame(2, 0x28, sequence, 0, 0, 0, new byte[] {0, 2, 1, 0}));
+    }
+
+    byte[] presence(int nonce, int counter) {
+        return windowDatagram(capabilities.presence(nonce, counter, serviceForwardingSequence++));
+    }
+
     void enableCapabilityRead(String identity) { capabilities = new ServiceCapabilities(identity); }
 
     byte[] nextCapabilityQuery(int sequence, long now) {
         if (!qos || capabilities == null) return null;
-        byte[] query = capabilities.nextQuery(sequence, 1, now);
-        return query == null ? null : windowDatagram(query);
+        byte[] query = capabilities.nextQuery(sequence, serviceForwardingSequence, now);
+        if (query == null) return null;
+        serviceForwardingSequence++;
+        return windowDatagram(query);
     }
 
     boolean beginServiceSwitch(int sequence, long now) {
@@ -69,6 +84,16 @@ final class TelemetryProtocol {
     void servicePacketSent(WifiServiceSwitch.Packet packet, long now) { service.sent(packet, now); }
 
     WifiServiceSwitch.State serviceState(long now) { return service == null ? null : service.state(now); }
+
+    boolean commandReady(long now) {
+        return serviceState(now) == WifiServiceSwitch.State.COMMITTED
+            && capabilities.commandRouteReady(now);
+    }
+
+    byte[] flightDatagram(byte[] frame, long now) {
+        if (!commandReady(now)) throw new IllegalStateException("Flight service unavailable");
+        return windowDatagram(capabilities.wrapService(frame, serviceForwardingSequence++));
+    }
 
     ServiceCapabilities.State capabilityState(long now) {
         return capabilities.state(now);
@@ -273,12 +298,14 @@ final class TelemetryProtocol {
     }
 
     private void inspect(byte[] frame) {
+        inspectFlightReply(frame);
+
         if (frame[4] == 7 && frame[5] == 2 && frame[9] == 7 && u(frame[10]) == 0x94
                 && frame.length >= 44 && (frame[11] & 31) != 0 && frame[14] == 2) {
             peerObserved = true;
         }
         if (!plaintextPush(frame[8])) return;
-        boolean forwarded = false;
+        boolean forwarded = false, boundBroadcast = false;
         if (u(frame[4]) == 0x27 && u(frame[5]) == 0xee && frame[9] == 0x51 && frame[10] == 1) {
             if (frame.length < 26) return;
             int innerLength = word(frame, 12) & 1023;
@@ -294,20 +321,36 @@ final class TelemetryProtocol {
                 if (service != null && capabilities.state(now) == ServiceCapabilities.State.SUPPORTED
                         && capabilities.fromBoundPeer(source, destination)) service.receive(frame, now);
             }
+            if (commandReady(now) && (capabilities.fromBoundPeer(source, destination)
+                    || (destination == -1 && capabilities.fromBoundBroadcast(source)))) {
+                inspectFlightReply(frame);
+            }
             if (destination != -1 || !plaintextPush(frame[8])) return;
+            boundBroadcast = capabilities != null && capabilities.fromBoundBroadcast(source);
             forwarded = true;
         }
         if (frame[4] != 3 || frame[9] != 3) return;
         int receiver = u(frame[5]);
         if (receiver != 2 && !(forwarded && (receiver == 14 || receiver == 170))) return;
         int payloadLength = frame.length - 13;
+        boolean trusted = commandReady(now) && (!forwarded || boundBroadcast);
+        if (trusted && frame[10] == 0x53 && frame[8] == 0 && payloadLength == 4
+                && (receiver == 2 || receiver == 14)) {
+            observer.landingConfirmation((frame[11] & 0x20) != 0);
+        }
         if (frame[10] == 0x43 && payloadLength >= 37 && (receiver == 2 || payloadLength == 85)) {
             int flags = u(frame[11 + 32]);
             observer.flight((flags & 14) == 12, (flags & 8) != 0);
+            if (trusted) observer.flightEvidence((flags & 14) == 12, (flags & 8) != 0);
         } else if (frame[10] == 0x55 && payloadLength >= 10) {
             int percent = u(frame[11 + 8]);
             if (percent <= 100) observer.battery(percent);
         }
+    }
+
+    private void inspectFlightReply(byte[] frame) {
+        if (frame[4] == 3 && frame[5] == 2 && frame[9] == 3 && frame[10] == 0x2a
+                && commandReady(now)) observer.flightReply(frame);
     }
 
     private static boolean validFrame(byte[] frame) {
