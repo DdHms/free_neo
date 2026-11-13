@@ -13,6 +13,7 @@ final class TelemetryProtocol {
         void battery(int percent);
         default void flightEvidence(boolean flying, boolean motorsOn) {}
         default void landingConfirmation(boolean needed) {}
+        default void video(byte[] payload, long receivedNanos) {}
         default void flightReply(byte[] frame) {}
     }
 
@@ -200,15 +201,16 @@ final class TelemetryProtocol {
             }
             if (distance(advertisedEnd, start) > distance(end, start)) end = advertisedEnd;
             if (!waiting.containsKey(sequence)) {
-                byte[] payload = deliver ? Arrays.copyOfRange(packet, 20, 20 + length) : new byte[0];
+                byte[] payload = Arrays.copyOfRange(packet, 20, 20 + length);
                 waiting.put(sequence, new Fragment(payload, System.nanoTime()));
             }
             int next = (start + 8) & 0xffff;
             while (waiting.containsKey(next)) {
                 Fragment fragment = waiting.remove(next);
                 start = next;
-                if (deliver && fragment.payload.length != 0) {
-                    if (System.nanoTime() - fragment.receivedNanos <= 1_000_000_000L) feed(fragment.payload);
+                if (fragment.payload.length != 0) {
+                    if (!deliver) observer.video(fragment.payload, fragment.receivedNanos);
+                    else if (System.nanoTime() - fragment.receivedNanos <= 1_000_000_000L) feed(fragment.payload);
                     else used = 0;
                 }
                 next = (start + 8) & 0xffff;

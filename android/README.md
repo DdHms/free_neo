@@ -33,11 +33,20 @@ acknowledgement reports command acceptance. The app uses flight and motor
 telemetry to report touchdown. Keep independent controls available during
 testing. The live Android flight path has not been verified on aircraft hardware.
 
+**Open flight controls** also opens an HEVC preview. **Arm manual movement**
+requires current preview frames, fresh airborne telemetry, and at least 20%
+battery. Hold and drag the left stick to climb, descend or rotate. Hold and
+drag the right stick to translate. Releasing a stick centers its axes. Losing
+preview, telemetry or app focus stops movement input. Camera up and down
+request level and 30° down respectively. A decoder error requires reopening
+the flight session. The aircraft's response to these new controls requires
+hardware verification.
+
 Run the simulator, pairing, and telemetry tests with JDK 17 from this directory.
 
 ```sh
 classes=$(mktemp -d)
-javac --release 17 -d "$classes" app/src/main/java/dev/freeneo/app/{FlightSimulation,PairingExchange,TelemetryProtocol,FlightCommand,ServiceCapabilities,WifiServiceSwitch,LiveFlight}.java tests/*.java
+javac --release 17 -d "$classes" app/src/main/java/dev/freeneo/app/{FlightSimulation,PairingExchange,TelemetryProtocol,FlightCommand,ServiceCapabilities,WifiServiceSwitch,LiveFlight,ManualControl,HevcAccessUnits}.java tests/*.java
 java -cp "$classes" dev.freeneo.app.FlightSimulationTest
 java -cp "$classes" dev.freeneo.app.PairingExchangeTest
 java -cp "$classes" dev.freeneo.app.TelemetryProtocolTest
@@ -45,4 +54,5 @@ java -cp "$classes" dev.freeneo.app.FlightCommandTest
 java -cp "$classes" dev.freeneo.app.LiveFlightTest
 java -cp "$classes" dev.freeneo.app.ServiceCapabilitiesTest
 java -cp "$classes" dev.freeneo.app.WifiServiceSwitchTest
+java -cp "$classes" dev.freeneo.app.ManualControlTest
 ```

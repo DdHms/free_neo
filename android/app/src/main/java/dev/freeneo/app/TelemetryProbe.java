@@ -25,6 +25,14 @@ final class TelemetryProbe implements AutoCloseable {
     private record Intent(FlightCommand.Action action, long queuedAt) {}
     private final Mode mode;
     private final Consumer<LiveFlight.Controls> controls;
+    private final AndroidPreview preview;
+    private record StickInput(ManualControl axes, long at) {}
+    private volatile StickInput stickInput;
+    private volatile boolean movementReady;
+    private final java.util.concurrent.atomic.AtomicBoolean manualArmed = new java.util.concurrent.atomic.AtomicBoolean();
+
+    boolean movementReady() { return movementReady; }
+    private final AtomicReference<Integer> cameraPitch = new AtomicReference<>();
     private final LiveFlight flight = new LiveFlight();
     private final AtomicReference<Intent> intent = new AtomicReference<>();
     private final Consumer<String> status;
@@ -35,17 +43,31 @@ final class TelemetryProbe implements AutoCloseable {
     private int battery;
 
     TelemetryProbe(Network network, InetAddress host, int port, String identity, Mode mode, Consumer<String> status,
-                   Consumer<LiveFlight.Controls> controls) {
+                   Consumer<LiveFlight.Controls> controls, AndroidPreview preview) {
         this.network = network;
         this.host = host;
         this.port = port;
         this.identity = identity;
         this.mode = mode;
         this.controls = controls;
+        this.preview = preview;
         this.status = status;
     }
 
     void start() { new Thread(this::run, "neo2-telemetry").start(); }
+
+    void armMovement(boolean armed) {
+        manualArmed.set(armed && movementReady);
+        if (!armed) sticks(null);
+    }
+
+    boolean movementArmed() { return manualArmed.get(); }
+
+    void sticks(ManualControl axes) {
+        stickInput = axes == null ? null : new StickInput(axes, SystemClock.elapsedRealtime());
+    }
+
+    void camera(int pitch) { cameraPitch.set(pitch); }
 
     void request(FlightCommand.Action action) {
         if (!closed && mode == Mode.LIVE) {
@@ -71,6 +93,10 @@ final class TelemetryProbe implements AutoCloseable {
                     flight.confirmation(needed, SystemClock.elapsedRealtime());
                 }
 
+                @Override public void video(byte[] payload, long receivedNanos) {
+                    if (preview != null) preview.offer(payload, receivedNanos);
+                }
+
                 @Override public void flightReply(byte[] frame) { flight.reply(frame); }
 
                 @Override public void battery(int percent) {
@@ -93,6 +119,8 @@ final class TelemetryProbe implements AutoCloseable {
             long start = SystemClock.elapsedRealtime();
             long nextOpen = start, nextAck = start, nextStatus = start;
             long nextHeartbeat = start + 800, nextPresence = start;
+            boolean wasMoving = false;
+            long nextMovement = start;
             int opens = 0, presenceCounter = 0;
             int presenceNonce = random.nextInt(1, 65536);
             int reportSequence = random.nextInt(1, 65533);
@@ -130,8 +158,32 @@ final class TelemetryProbe implements AutoCloseable {
                                 ? null : flight.begin(requested.action(),
                                     (reportSequence + (requested.action() == FlightCommand.Action.LAND ? 1 : 0)) & 0xffff,
                                     protocol.commandReady(now), now);
-                            if (command == null) send(link, protocol.acknowledge());
+                            if (command == null) {
+                                boolean routeReady = protocol.commandReady(now);
+                                boolean manualReady = preview != null && preview.fresh()
+                                    && now - lastBattery <= 1000 && battery >= 20
+                                    && flight.controls(routeReady, now).land();
+                                StickInput stick = stickInput;
+                                ManualControl axes = manualReady && manualArmed.get() && stick != null && now - stick.at() < 150
+                                    ? stick.axes() : ManualControl.NEUTRAL;
+                                boolean moving = !axes.equals(ManualControl.NEUTRAL);
+                                Integer pitch = cameraPitch.getAndSet(null);
+                                if (!manualReady) armMovement(false);
+                                boolean sentMovement = routeReady && (moving ? now >= nextMovement : wasMoving);
+                                if (sentMovement) {
+                                    nextMovement = now + 50;
+                                    send(link, protocol.flightDatagram(axes.frame(reportSequence++ & 0xffff), now));
+                                }
+                                wasMoving = moving || (wasMoving && !routeReady);
+                                if (pitch != null && routeReady && preview != null && preview.fresh()) {
+                                    send(link, protocol.flightDatagram(ManualControl.cameraPitch(pitch,
+                                        reportSequence++ & 0xffff), now));
+                                }
+                                if (!sentMovement && pitch == null) send(link, protocol.acknowledge());
+                            }
                             else {
+                                armMovement(false);
+                                wasMoving = false;
                                 if (command.action() == FlightCommand.Action.LAND) {
                                     send(link, protocol.flightDatagram(FlightCommand.neutral(reportSequence & 0xffff), now));
                                 }
@@ -146,10 +198,15 @@ final class TelemetryProbe implements AutoCloseable {
                     nextAck = now + 20;
                 }
                 if (now >= nextStatus) {
-                    if (mode == Mode.LIVE) controls.accept(flight.controls(protocol.commandReady(now), now));
+                    if (mode == Mode.LIVE) {
+                        var available = flight.controls(protocol.commandReady(now), now);
+                        movementReady = available.land() && preview != null && preview.fresh()
+                            && now - lastBattery <= 1000 && battery >= 20;
+                        controls.accept(available);
+                    }
                     if (protocol.accepted()) status.accept(summary(now) + "\n" + capabilityStatus(protocol.capabilityState(now))
                         + (mode != Mode.READ ? serviceStatus(protocol.serviceState(now)) : "")
-                        + (mode == Mode.LIVE ? "\n" + flight.message() : "") + "\n" + endpoint);
+                        + (mode == Mode.LIVE ? "\n" + flight.message() : "") + "\n" + endpoint + (preview == null ? "" : "\n" + preview.status()));
                     nextStatus = now + 250;
                 }
                 try {
@@ -182,6 +239,8 @@ final class TelemetryProbe implements AutoCloseable {
             }
         } finally {
             closed = true;
+            movementReady = false;
+            if (preview != null) preview.close();
             socket = null;
             if (mode == Mode.LIVE) controls.accept(LiveFlight.Controls.DISABLED);
         }

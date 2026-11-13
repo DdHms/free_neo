@@ -20,6 +20,9 @@ import android.os.ParcelUuid;
 import android.os.SystemClock;
 import android.text.InputType;
 import android.widget.Button;
+import android.widget.Switch;
+import android.view.SurfaceView;
+import android.view.SurfaceHolder;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -47,6 +50,23 @@ public final class MainActivity extends Activity {
     private TelemetryProbe probe;
     private EditText hostInput, portInput;
     private TextView telemetryStatus;
+    private SurfaceView liveVideo;
+    private Switch manualArm;
+    private ManualStick leftStick, rightStick;
+    private Button cameraUp, cameraDown;
+    private AndroidPreview preview;
+    private int right, forward, up, yaw;
+    private final Runnable publishSticks = new Runnable() {
+        @Override public void run() {
+            if (probe == null || !manualArm.isChecked()) return;
+            if (!probe.movementArmed()) {
+                manualArm.setChecked(false);
+                return;
+            }
+            probe.sticks(leftStick.held() || rightStick.held() ? new ManualControl(right, forward, up, yaw) : null);
+            handler.postDelayed(this, 40);
+        }
+    };
     private Button liveTakeoff, liveLand, liveConfirm;
     private int probeGeneration;
     private final Runnable scanTimeout = () -> finishScan(
@@ -124,6 +144,7 @@ public final class MainActivity extends Activity {
         liveConfirm = button(page, "Confirm landing area is clear", () -> confirmFlight(
             FlightCommand.Action.CONFIRM_LANDING, "Confirm landing?",
             "Check the landing area visually. Confirm only if the surface is safe and the area is clear."));
+        addManualControls(page);
         renderLiveControls(LiveFlight.Controls.DISABLED);
 
         label(page, "Flight simulator").setTextSize(20);
@@ -153,6 +174,57 @@ public final class MainActivity extends Activity {
         });
         button(page, "Reset simulator", this::resetSimulation);
         renderSimulation();
+    }
+
+    private void addManualControls(LinearLayout page) {
+        liveVideo = new SurfaceView(this);
+        int size = Math.round(200 * getResources().getDisplayMetrics().density);
+        page.addView(liveVideo, new LinearLayout.LayoutParams(-1, size));
+        liveVideo.getHolder().addCallback(new SurfaceHolder.Callback() {
+            @Override public void surfaceCreated(SurfaceHolder holder) {}
+            @Override public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {}
+            @Override public void surfaceDestroyed(SurfaceHolder holder) {
+                manualArm.setChecked(false);
+                if (preview != null) preview.close();
+            }
+        });
+        manualArm = new Switch(this);
+        manualArm.setText("Arm manual movement");
+        page.addView(manualArm);
+        manualArm.setOnCheckedChangeListener((view, checked) -> {
+            handler.removeCallbacks(publishSticks);
+            if (checked) {
+                new AlertDialog.Builder(this).setTitle("Arm manual movement?")
+                    .setMessage("Confirm that the aircraft is in sight and independent controls are ready.")
+                    .setNegativeButton("Cancel", (dialog, which) -> manualArm.setChecked(false))
+                    .setOnCancelListener(dialog -> manualArm.setChecked(false))
+                    .setPositiveButton("Arm", (dialog, which) -> {
+                        if (manualArm.isChecked() && manualArm.isEnabled()) {
+                            if (probe != null) probe.armMovement(true);
+                            leftStick.setEnabled(true);
+                            rightStick.setEnabled(true);
+                            publishSticks.run();
+                        }
+                    }).show();
+            } else {
+                leftStick.release();
+                rightStick.release();
+                leftStick.setEnabled(false);
+                rightStick.setEnabled(false);
+                if (probe != null) probe.armMovement(false);
+            }
+        });
+        var sticks = new LinearLayout(this);
+        page.addView(sticks);
+        leftStick = new ManualStick(this, "Climb, descend, and rotate", (x, y) -> { yaw = x; up = y; });
+        rightStick = new ManualStick(this, "Move forward, backward, left, and right", (x, y) -> { right = x; forward = y; });
+        sticks.addView(leftStick, new LinearLayout.LayoutParams(0, size, 1));
+        sticks.addView(rightStick, new LinearLayout.LayoutParams(0, size, 1));
+        label(page, "Left stick · climb and rotate   Right stick · translate");
+        cameraUp = button(page, "Camera up", () -> { if (probe != null) probe.camera(0); });
+        cameraDown = button(page, "Camera down", () -> { if (probe != null) probe.camera(-30); });
+        leftStick.setEnabled(false);
+        rightStick.setEnabled(false);
     }
 
     private EditText field(LinearLayout parent, String hint, int inputType) {
@@ -226,11 +298,14 @@ public final class MainActivity extends Activity {
             identity = UUID.randomUUID().toString().replace("-", "");
             identities.edit().putString("identity", identity).apply();
         }
+        if (mode == TelemetryProbe.Mode.LIVE && liveVideo.getHolder().getSurface().isValid()) {
+            preview = new AndroidPreview(liveVideo.getHolder().getSurface());
+        }
         probe = new TelemetryProbe(network, host, port, identity, mode, message -> handler.post(() -> {
             if (generation == probeGeneration) telemetryStatus.setText(message);
         }), controls -> handler.post(() -> {
             if (generation == probeGeneration) renderLiveControls(controls);
-        }));
+        }), preview);
         probe.start();
     }
 
@@ -238,6 +313,12 @@ public final class MainActivity extends Activity {
         liveTakeoff.setEnabled(controls.takeoff());
         liveLand.setEnabled(controls.land());
         liveConfirm.setEnabled(controls.confirm());
+        boolean videoFresh = preview != null && preview.fresh();
+        boolean allowArm = controls.land() && videoFresh && probe != null && probe.movementReady();
+        if (!allowArm) manualArm.setChecked(false);
+        manualArm.setEnabled(allowArm);
+        cameraUp.setEnabled(videoFresh);
+        cameraDown.setEnabled(videoFresh);
     }
 
     private void requestFlight(FlightCommand.Action action) {
@@ -255,6 +336,10 @@ public final class MainActivity extends Activity {
 
     private void stopProbe() {
         probeGeneration++;
+        if (preview != null) {
+            preview.close();
+            preview = null;
+        }
         if (probe != null) {
             probe.close();
             probe = null;
@@ -405,6 +490,12 @@ public final class MainActivity extends Activity {
     private void finishScan(String message) {
         stopScan();
         discoveryStatus.setText(message);
+    }
+
+    @Override public void onWindowFocusChanged(boolean focused) {
+        super.onWindowFocusChanged(focused);
+        // The arming dialog owns focus until its positive action enables the sticks.
+        if (!focused && leftStick != null && leftStick.isEnabled()) manualArm.setChecked(false);
     }
 
     @Override protected void onStart() {
