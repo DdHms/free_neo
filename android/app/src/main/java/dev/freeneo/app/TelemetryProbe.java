@@ -17,6 +17,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 /** Owns the DJI session on the Android network acquired for the drone. */
 final class TelemetryProbe implements AutoCloseable {
+    private static final long BATTERY_MAX_AGE_MS = 3000;
     private final Network network;
     private final InetAddress host;
     private final int port;
@@ -25,11 +26,15 @@ final class TelemetryProbe implements AutoCloseable {
     private record Intent(FlightCommand.Action action, long queuedAt) {}
     private final Mode mode;
     private final Consumer<LiveFlight.Controls> controls;
-    private final AndroidPreview preview;
+    private volatile AndroidPreview preview;
     private record StickInput(ManualControl axes, long at) {}
     private volatile StickInput stickInput;
     private volatile boolean movementReady;
     private final java.util.concurrent.atomic.AtomicBoolean manualArmed = new java.util.concurrent.atomic.AtomicBoolean();
+
+    void setPreview(AndroidPreview replacement) {
+        preview = replacement;
+    }
 
     boolean movementReady() { return movementReady; }
     private final AtomicReference<Integer> cameraPitch = new AtomicReference<>();
@@ -56,9 +61,11 @@ final class TelemetryProbe implements AutoCloseable {
 
     void start() { new Thread(this::run, "neo2-telemetry").start(); }
 
-    void armMovement(boolean armed) {
-        manualArmed.set(armed && movementReady);
-        if (!armed) sticks(null);
+    boolean armMovement(boolean armed) {
+        boolean allowed = armed && movementReady && !closed;
+        manualArmed.set(allowed);
+        if (!allowed) sticks(null);
+        return allowed;
     }
 
     boolean movementArmed() { return manualArmed.get(); }
@@ -94,7 +101,8 @@ final class TelemetryProbe implements AutoCloseable {
                 }
 
                 @Override public void video(byte[] payload, long receivedNanos) {
-                    if (preview != null) preview.offer(payload, receivedNanos);
+                    var current = preview;
+                    if (current != null) current.offer(payload, receivedNanos);
                 }
 
                 @Override public void flightReply(byte[] frame) { flight.reply(frame); }
@@ -126,6 +134,7 @@ final class TelemetryProbe implements AutoCloseable {
             int reportSequence = random.nextInt(1, 65533);
             while (!closed && ((mode == Mode.LIVE && protocol.accepted()) || SystemClock.elapsedRealtime() - start < 8_000)) {
                 long now = SystemClock.elapsedRealtime();
+                var preview = this.preview;
                 if (!protocol.accepted() && opens < 4 && now >= nextOpen) {
                     step = "sending DJI session request";
                     send(link, protocol.open());
@@ -161,14 +170,17 @@ final class TelemetryProbe implements AutoCloseable {
                             if (command == null) {
                                 boolean routeReady = protocol.commandReady(now);
                                 boolean manualReady = preview != null && preview.fresh()
-                                    && now - lastBattery <= 1000 && battery >= 20
+                                    && now - lastBattery <= BATTERY_MAX_AGE_MS && battery >= 20
                                     && flight.controls(routeReady, now).land();
                                 StickInput stick = stickInput;
                                 ManualControl axes = manualReady && manualArmed.get() && stick != null && now - stick.at() < 150
                                     ? stick.axes() : ManualControl.NEUTRAL;
                                 boolean moving = !axes.equals(ManualControl.NEUTRAL);
                                 Integer pitch = cameraPitch.getAndSet(null);
-                                if (!manualReady) armMovement(false);
+                                if (!manualReady) {
+                                    movementReady = false;
+                                    armMovement(false);
+                                }
                                 boolean sentMovement = routeReady && (moving ? now >= nextMovement : wasMoving);
                                 if (sentMovement) {
                                     nextMovement = now + 50;
@@ -201,12 +213,12 @@ final class TelemetryProbe implements AutoCloseable {
                     if (mode == Mode.LIVE) {
                         var available = flight.controls(protocol.commandReady(now), now);
                         movementReady = available.land() && preview != null && preview.fresh()
-                            && now - lastBattery <= 1000 && battery >= 20;
+                            && now - lastBattery <= BATTERY_MAX_AGE_MS && battery >= 20;
                         controls.accept(available);
                     }
                     if (protocol.accepted()) status.accept(summary(now) + "\n" + capabilityStatus(protocol.capabilityState(now))
                         + (mode != Mode.READ ? serviceStatus(protocol.serviceState(now)) : "")
-                        + (mode == Mode.LIVE ? "\n" + flight.message() : "") + "\n" + endpoint + (preview == null ? "" : "\n" + preview.status()));
+                        + (mode == Mode.LIVE ? manualStatus(protocol.commandReady(now), now) : "") + "\n" + endpoint + (preview == null ? "" : "\n" + preview.status()));
                     nextStatus = now + 250;
                 }
                 try {
@@ -240,10 +252,21 @@ final class TelemetryProbe implements AutoCloseable {
         } finally {
             closed = true;
             movementReady = false;
-            if (preview != null) preview.close();
+            var current = preview;
+            if (current != null) current.close();
             socket = null;
             if (mode == Mode.LIVE) controls.accept(LiveFlight.Controls.DISABLED);
         }
+    }
+
+    private String manualStatus(boolean routeReady, long now) {
+        var preview = this.preview;
+        String result = "\n" + flight.message() + "\n" + flight.landingBlocker(routeReady, now);
+        if (preview == null || !preview.fresh()) return result + "\nManual movement requires fresh preview frames.";
+        if (now - lastBattery > BATTERY_MAX_AGE_MS) return result + "\nManual movement requires a fresh battery reading.";
+        if (battery < 20) return result + "\nManual movement requires at least 20% battery.";
+        if (manualArmed.get()) return result + "\nManual movement armed. Hold a stick to move.";
+        return result;
     }
 
     private static String serviceStatus(WifiServiceSwitch.State state) {
@@ -269,7 +292,7 @@ final class TelemetryProbe implements AutoCloseable {
         String flight = now - lastFlight <= 1000
             ? "Aircraft reports " + (flying ? "flying" : "not flying") + " · motors " + (motorsOn ? "on" : "off")
             : "Flight and motor state unavailable";
-        String power = now - lastBattery <= 3000 ? "Battery " + battery + "%" : "Battery unavailable";
+        String power = now - lastBattery <= BATTERY_MAX_AGE_MS ? "Battery " + battery + "%" : "Battery unavailable";
         return flight + "\n" + power;
     }
 

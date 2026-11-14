@@ -333,18 +333,20 @@ final class TelemetryProtocol {
         }
         if (frame[4] != 3 || frame[9] != 3) return;
         int receiver = u(frame[5]);
-        if (receiver != 2 && !(forwarded && (receiver == 14 || receiver == 170))) return;
         int payloadLength = frame.length - 13;
         boolean trusted = commandReady(now) && (!forwarded || boundBroadcast);
         if (trusted && frame[10] == 0x53 && frame[8] == 0 && payloadLength == 4
                 && (receiver == 2 || receiver == 14)) {
             observer.landingConfirmation((frame[11] & 0x20) != 0);
         }
-        if (frame[10] == 0x43 && payloadLength >= 37 && (receiver == 2 || payloadLength == 85)) {
+        if (frame[10] == 0x43 && payloadLength >= 37 && (receiver == 2 || ((receiver == 14 || receiver == 170)
+                && payloadLength == 85 && (forwarded || trusted)))) {
             int flags = u(frame[11 + 32]);
             observer.flight((flags & 14) == 12, (flags & 8) != 0);
             if (trusted) observer.flightEvidence((flags & 14) == 12, (flags & 8) != 0);
-        } else if (frame[10] == 0x55 && payloadLength >= 10) {
+        } else if (frame[10] == 0x55 && (receiver == 2 && payloadLength >= 10
+                || forwarded && (receiver == 14 || receiver == 170) && payloadLength >= 10
+                || trusted && receiver == 14 && frame[8] == 0 && payloadLength == 10)) {
             int percent = u(frame[11 + 8]);
             if (percent <= 100) observer.battery(percent);
         }

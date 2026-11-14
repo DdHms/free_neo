@@ -5,7 +5,7 @@ import java.nio.ByteOrder;
 
 record ManualControl(int right, int forward, int up, int yaw) {
     static final ManualControl NEUTRAL = new ManualControl(0, 0, 0, 0);
-    private static final int LIMIT = 200;
+    static final int LIMIT = 250;
 
     ManualControl {
         right = clamp(right);

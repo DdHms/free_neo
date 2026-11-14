@@ -9,7 +9,7 @@ public final class ManualControlTest {
     public static void main(String[] args) {
         byte[] frame = new ManualControl(500, -500, 100, -100).frame(7);
         long word = ByteBuffer.wrap(frame).order(ByteOrder.LITTLE_ENDIAN).getLong(13);
-        check(channel(word, 8) == 1156 && channel(word, 19) == 892);
+        check(channel(word, 8) == 1189 && channel(word, 19) == 859);
         check(channel(word, 30) == 1090 && channel(word, 41) == 958);
         check(HexFormat.of().formatHex(ManualControl.cameraPitch(-30, 7), 11, 19)
             .equals("00000000d4fe070a"));

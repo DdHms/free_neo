@@ -14,26 +14,20 @@ The flight simulator also works without Bluetooth hardware.
   The simulated watchdog disables flight controls after its timeout and shows
   that aircraft state is unknown. Leaving the app resets the simulator.
 
-With the aircraft on the ground and its Wi-Fi connected, tap **Read telemetry**.
-The app uses the Neo 2 endpoint (UDP port 9003 and IPv4 address 192.168.2.1)
-when it is on the connected subnet, with the drone Wi-Fi IPv4 gateway as an
-address fallback. Optional overrides support alternate endpoints. The
-app saves the overrides on the phone. The eight-second probe binds its UDP socket
-to the drone's Wi-Fi and displays fresh received battery, flight and motor
-state when available. The probe opens a DJI transport session, sends receive
-acknowledgements, and reports an app-local identity when the aircraft accepts
-QoS transport. It reads the bound Neo 2 peer’s advertised Wi-Fi command
-capability. **Check flight service (ground only)** additionally attempts the bilateral
-service activation exchange. **Open flight controls** keeps the session open and enables **Take off** or
-**Land** once the Wi-Fi command service is active and the aircraft reports a
-fresh flight and motor state. After requesting landing, **Confirm landing
+Once Android joins the drone’s Wi-Fi, the app automatically opens the DJI
+session, reads telemetry, and negotiates the flight command service. The
+Neo 2 defaults to 192.168.2.1 on UDP port 9003. Optional endpoint overrides
+are available on the Connection tab. Takeoff becomes available when the
+service and ground telemetry are ready. Airborne telemetry opens the Flight
+tab with the live preview and manual controls. Landing controls are on both tabs.
+After requesting landing, **Confirm landing
 area is clear** is available only while the aircraft reports a fresh
 confirmation request. Visually inspect the area before confirming. An
 acknowledgement reports command acceptance. The app uses flight and motor
 telemetry to report touchdown. Keep independent controls available during
 testing. The live Android flight path has not been verified on aircraft hardware.
 
-**Open flight controls** also opens an HEVC preview. **Arm manual movement**
+The app starts the HEVC decoder when the DJI session opens. The Flight tab reveals the preview. **Arm manual movement**
 requires current preview frames, fresh airborne telemetry, and at least 20%
 battery. Hold and drag the left stick to climb, descend or rotate. Hold and
 drag the right stick to translate. Releasing a stick centers its axes. Losing

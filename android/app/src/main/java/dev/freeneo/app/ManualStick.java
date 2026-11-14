@@ -59,7 +59,7 @@ final class ManualStick extends View {
             float scale = Math.max(0, Math.min(1, (distance - .12f) / .88f)) / Math.max(distance, .01f);
             x = dx * scale;
             y = dy * scale;
-            input.accept(Math.round(x * 200), Math.round(y * 200));
+            input.accept(Math.round(x * ManualControl.LIMIT), Math.round(y * ManualControl.LIMIT));
             invalidate();
         }
         return true;
