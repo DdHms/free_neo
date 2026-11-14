@@ -2,8 +2,8 @@ package dev.freeneo.app;
 
 /** Command admission and outcome tracking, owned by the UDP worker. */
 final class LiveFlight {
-    record Controls(boolean takeoff, boolean land, boolean confirm) {
-        static final Controls DISABLED = new Controls(false, false, false);
+    record Controls(boolean takeoff, boolean land, boolean confirm, boolean airborne) {
+        static final Controls DISABLED = new Controls(false, false, false, false);
     }
 
     private long flightAt = -10_000, confirmationAt = -10_000, landAt = -1, sentAt;
@@ -18,6 +18,7 @@ final class LiveFlight {
         flightAt = now;
         if (flying && motors) {
             airborneObserved = true;
+            if (pending != null && pending.action() == FlightCommand.Action.TAKEOFF) pending = null;
             if (landAt < 0) message = "Aircraft reports airborne.";
         } else if (!flying && !motors && airborneObserved) {
             message = "Aircraft reports grounded with motors off.";
@@ -44,7 +45,7 @@ final class LiveFlight {
         return new Controls(!flying && !motors && !takeoffAttempted && landAt < 0,
             flying && motors && landAt < 0,
             motors && now - flightAt <= 500 && landAt >= 0 && !confirmationSent && needsConfirmation
-                && confirmationAt > landAt && now - confirmationAt <= 500);
+                && confirmationAt > landAt && now - confirmationAt <= 500, flying && motors);
     }
 
     FlightCommand begin(FlightCommand.Action action, int sequence, boolean ready, long now) {
@@ -80,6 +81,15 @@ final class LiveFlight {
             }
             pending = null;
         });
+    }
+
+    String landingBlocker(boolean ready, long now) {
+        if (!ready) return "Land unavailable: command route is not ready.";
+        if (now - flightAt > 1000) return "Land unavailable: trusted flight telemetry is stale.";
+        if (pending != null) return "Land unavailable: awaiting " + pending.action() + ".";
+        if (landAt >= 0) return "Landing already requested.";
+        if (!flying || !motors) return "Land unavailable: aircraft telemetry does not report airborne with motors on.";
+        return "Land available.";
     }
 
     String message() { return message; }

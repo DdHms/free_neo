@@ -27,11 +27,7 @@ record FlightCommand(Action action, int sequence) {
     }
 
     static byte[] neutral(int sequence) {
-        long word = (1L << 62) | (1024L << 8) | (1024L << 19) | (1024L << 30) | (1024L << 41);
-        byte[] payload = ByteBuffer.allocate(18).order(ByteOrder.LITTLE_ENDIAN)
-            .put((byte) 1).put((byte) 13).putLong(word).putInt(0x200)
-            .put(new byte[] {6, 0x55, 1, 4}).array();
-        return PairingExchange.frame(2, 0xa9, sequence, 0, 1, 0x0a, payload);
+        return ManualControl.NEUTRAL.frame(sequence);
     }
 
     byte[] forward(int localHash, int peerHash, int forwardingSequence) {

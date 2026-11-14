@@ -30,6 +30,12 @@ public final class LiveFlightTest {
         flight.observe(false, false, 900);
         check(flight.message().contains("grounded"));
         check(flight.controls(true, 901).takeoff());
+        var withoutAck = new LiveFlight();
+        withoutAck.observe(false, false, 100);
+        check(withoutAck.begin(TAKEOFF, 1, true, 101) != null);
+        withoutAck.observe(true, true, 200);
+        check(withoutAck.controls(true, 201).land());
+        check(!withoutAck.controls(true, 1201).land());
         System.out.println("Live flight state checks passed");
     }
 

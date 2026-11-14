@@ -20,6 +20,10 @@ import android.os.ParcelUuid;
 import android.os.SystemClock;
 import android.text.InputType;
 import android.widget.Button;
+import android.widget.Switch;
+import android.graphics.SurfaceTexture;
+import android.view.Surface;
+import android.view.TextureView;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -47,6 +51,29 @@ public final class MainActivity extends Activity {
     private TelemetryProbe probe;
     private EditText hostInput, portInput;
     private TextView telemetryStatus;
+    private TextureView liveVideo;
+    private Surface previewSurface;
+    private int previewHeight;
+    private LinearLayout connectionPage, flightPage;
+    private ScrollView scroll;
+    private Button connectionTab, flightTab;
+    private boolean airborneTabShown;
+    private Switch manualArm;
+    private ManualStick leftStick, rightStick;
+    private Button cameraUp, cameraDown;
+    private AndroidPreview preview;
+    private int right, forward, up, yaw;
+    private final Runnable publishSticks = new Runnable() {
+        @Override public void run() {
+            if (probe == null || !manualArm.isChecked()) return;
+            if (!probe.movementArmed()) {
+                manualArm.setChecked(false);
+                return;
+            }
+            probe.sticks(leftStick.held() || rightStick.held() ? new ManualControl(right, forward, up, yaw) : null);
+            handler.postDelayed(this, 40);
+        }
+    };
     private Button liveTakeoff, liveLand, liveConfirm;
     private int probeGeneration;
     private final Runnable scanTimeout = () -> finishScan(
@@ -82,7 +109,7 @@ public final class MainActivity extends Activity {
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        ScrollView scroll = new ScrollView(this);
+        scroll = new ScrollView(this);
         LinearLayout page = new LinearLayout(this);
         page.setOrientation(LinearLayout.VERTICAL);
         int padding = (int) (24 * getResources().getDisplayMetrics().density);
@@ -92,16 +119,37 @@ public final class MainActivity extends Activity {
 
         TextView title = label(page, "Free Neo");
         title.setTextSize(32);
+        var tabs = new LinearLayout(this);
+        page.addView(tabs);
+        connectionTab = button(tabs, "Connection", () -> showFlightTab(false));
+        flightTab = button(tabs, "Flight", () -> showFlightTab(true));
+        var common = new LinearLayout(this);
+        common.setOrientation(LinearLayout.VERTICAL);
+        page.addView(common);
+        connectionPage = new LinearLayout(this);
+        connectionPage.setOrientation(LinearLayout.VERTICAL);
+        flightPage = new LinearLayout(this);
+        flightPage.setOrientation(LinearLayout.VERTICAL);
+        liveVideo = new TextureView(this);
+        previewHeight = Math.round(200 * getResources().getDisplayMetrics().density);
+        page.addView(liveVideo, new LinearLayout.LayoutParams(-1, 1));
+        page.addView(connectionPage);
+        page.addView(flightPage);
+        page = connectionPage;
         label(page, "Aircraft discovery").setTextSize(20);
         discoveryStatus = label(page, "Scan for a nearby Neo 2.");
         scan = button(page, "Scan for Neo 2", this::requestScan);
         drone = new DroneConnection(this, handler, message -> {
             discoveryStatus.setText(message);
-            if (drone.network() == null) stopProbe();
+            if (drone.network() == null) {
+                stopProbe();
+                showFlightTab(false);
+            } else startFlightSessionIfConnected();
         });
         button(page, "Disconnect drone", () -> {
             stopProbe();
             drone.close();
+            showFlightTab(false);
             discoveryStatus.setText("Drone disconnected.");
         });
         results = new LinearLayout(this);
@@ -114,16 +162,15 @@ public final class MainActivity extends Activity {
         var endpoint = getSharedPreferences("drone-endpoint", MODE_PRIVATE);
         hostInput.setText(endpoint.getString("host", ""));
         portInput.setText(endpoint.getString("port", ""));
-        telemetryStatus = label(page, "Connect to drone Wi-Fi to read telemetry.");
-        button(page, "Read telemetry", () -> readTelemetry(TelemetryProbe.Mode.READ));
-        button(page, "Check flight service (ground only)", () -> readTelemetry(TelemetryProbe.Mode.CHECK_SERVICE));
-        button(page, "Open flight controls", () -> readTelemetry(TelemetryProbe.Mode.LIVE));
-        liveTakeoff = button(page, "Take off", () -> confirmFlight(FlightCommand.Action.TAKEOFF,
+        telemetryStatus = label(common, "Connect to a drone to enable flight controls.");
+        liveTakeoff = button(common, "Take off", () -> confirmFlight(FlightCommand.Action.TAKEOFF,
             "Take off?", "Confirm the aircraft is on the ground, the area is clear, and independent controls are ready."));
-        liveLand = button(page, "Land", () -> requestFlight(FlightCommand.Action.LAND));
-        liveConfirm = button(page, "Confirm landing area is clear", () -> confirmFlight(
+        liveLand = button(common, "Land", () -> requestFlight(FlightCommand.Action.LAND));
+        liveConfirm = button(common, "Confirm landing area is clear", () -> confirmFlight(
             FlightCommand.Action.CONFIRM_LANDING, "Confirm landing?",
             "Check the landing area visually. Confirm only if the surface is safe and the area is clear."));
+        addManualControls(flightPage);
+        showFlightTab(false);
         renderLiveControls(LiveFlight.Controls.DISABLED);
 
         label(page, "Flight simulator").setTextSize(20);
@@ -155,6 +202,89 @@ public final class MainActivity extends Activity {
         renderSimulation();
     }
 
+    private void showFlightTab(boolean selected) {
+        liveVideo.getLayoutParams().height = selected ? previewHeight : 1;
+        liveVideo.setAlpha(selected ? 1f : 0f);
+        liveVideo.requestLayout();
+        if (!selected && manualArm != null) manualArm.setChecked(false);
+        connectionPage.setVisibility(selected ? android.view.View.GONE : android.view.View.VISIBLE);
+        flightPage.setVisibility(selected ? android.view.View.VISIBLE : android.view.View.GONE);
+        connectionTab.setEnabled(selected);
+        flightTab.setEnabled(!selected);
+        scroll.scrollTo(0, 0);
+    }
+
+    private void startFlightSessionIfConnected() {
+        if (started && drone.network() != null && probe == null && liveVideo.isAvailable()) {
+            readTelemetry(TelemetryProbe.Mode.LIVE);
+        }
+    }
+
+    private void attachPreview() {
+        if (probe == null || preview != null || !liveVideo.isAvailable()) return;
+        previewSurface = new Surface(liveVideo.getSurfaceTexture());
+        preview = new AndroidPreview(previewSurface);
+        probe.setPreview(preview);
+    }
+
+    private void detachPreview() {
+        if (probe != null) probe.setPreview(null);
+        if (preview != null) preview.close();
+        preview = null;
+        if (previewSurface != null) previewSurface.release();
+        previewSurface = null;
+    }
+
+    private void addManualControls(LinearLayout page) {
+        int size = previewHeight;
+        liveVideo.setSurfaceTextureListener(new TextureView.SurfaceTextureListener() {
+            @Override public void onSurfaceTextureAvailable(SurfaceTexture texture, int width, int height) {
+                attachPreview();
+                startFlightSessionIfConnected();
+            }
+            @Override public void onSurfaceTextureSizeChanged(SurfaceTexture texture, int width, int height) {}
+            @Override public void onSurfaceTextureUpdated(SurfaceTexture texture) {}
+            @Override public boolean onSurfaceTextureDestroyed(SurfaceTexture texture) {
+                manualArm.setChecked(false);
+                detachPreview();
+                return true;
+            }
+        });
+        manualArm = new Switch(this);
+        manualArm.setText("Arm manual movement");
+        page.addView(manualArm);
+        label(page, "Arm only with the aircraft in sight and independent controls ready.");
+        manualArm.setOnCheckedChangeListener((view, checked) -> {
+            handler.removeCallbacks(publishSticks);
+            if (checked) {
+                if (probe == null || !probe.armMovement(true)) {
+                    manualArm.setChecked(false);
+                    return;
+                }
+                leftStick.setEnabled(true);
+                rightStick.setEnabled(true);
+                publishSticks.run();
+            } else {
+                leftStick.release();
+                rightStick.release();
+                leftStick.setEnabled(false);
+                rightStick.setEnabled(false);
+                if (probe != null) probe.armMovement(false);
+            }
+        });
+        var sticks = new LinearLayout(this);
+        page.addView(sticks);
+        leftStick = new ManualStick(this, "Climb, descend, and rotate", (x, y) -> { yaw = x; up = y; });
+        rightStick = new ManualStick(this, "Move forward, backward, left, and right", (x, y) -> { right = x; forward = y; });
+        sticks.addView(leftStick, new LinearLayout.LayoutParams(0, size, 1));
+        sticks.addView(rightStick, new LinearLayout.LayoutParams(0, size, 1));
+        label(page, "Left stick · climb and rotate   Right stick · translate");
+        cameraUp = button(page, "Camera up", () -> { if (probe != null) probe.camera(0); });
+        cameraDown = button(page, "Camera down", () -> { if (probe != null) probe.camera(-30); });
+        leftStick.setEnabled(false);
+        rightStick.setEnabled(false);
+    }
+
     private EditText field(LinearLayout parent, String hint, int inputType) {
         EditText field = new EditText(this);
         field.setHint(hint);
@@ -176,7 +306,7 @@ public final class MainActivity extends Activity {
         var connectivity = getSystemService(ConnectivityManager.class);
         var properties = connectivity.getLinkProperties(network);
         if (properties == null) {
-            telemetryStatus.setText("Waiting for drone Wi-Fi network settings. Try again.");
+            telemetryStatus.setText("Drone Wi-Fi settings unavailable. Reconnect to retry.");
             return;
         }
         var routes = properties.getRoutes();
@@ -230,14 +360,26 @@ public final class MainActivity extends Activity {
             if (generation == probeGeneration) telemetryStatus.setText(message);
         }), controls -> handler.post(() -> {
             if (generation == probeGeneration) renderLiveControls(controls);
-        }));
+        }), null);
+        attachPreview();
         probe.start();
     }
 
     private void renderLiveControls(LiveFlight.Controls controls) {
+        if (controls.airborne() && !airborneTabShown) {
+            airborneTabShown = true;
+            showFlightTab(true);
+        }
+        if (controls.takeoff()) airborneTabShown = false;
         liveTakeoff.setEnabled(controls.takeoff());
         liveLand.setEnabled(controls.land());
         liveConfirm.setEnabled(controls.confirm());
+        boolean videoFresh = preview != null && preview.fresh();
+        boolean allowArm = controls.land() && videoFresh && probe != null && probe.movementReady();
+        if (!allowArm) manualArm.setChecked(false);
+        manualArm.setEnabled(allowArm);
+        cameraUp.setEnabled(videoFresh);
+        cameraDown.setEnabled(videoFresh);
     }
 
     private void requestFlight(FlightCommand.Action action) {
@@ -255,12 +397,14 @@ public final class MainActivity extends Activity {
 
     private void stopProbe() {
         probeGeneration++;
+        airborneTabShown = false;
+        detachPreview();
         if (probe != null) {
             probe.close();
             probe = null;
         }
         renderLiveControls(LiveFlight.Controls.DISABLED);
-        telemetryStatus.setText("Read telemetry to start a new probe.");
+        telemetryStatus.setText("Connect to a drone to enable flight controls.");
     }
 
     private TextView label(LinearLayout parent, String text) {
@@ -407,9 +551,15 @@ public final class MainActivity extends Activity {
         discoveryStatus.setText(message);
     }
 
+    @Override public void onWindowFocusChanged(boolean focused) {
+        super.onWindowFocusChanged(focused);
+        if (!focused && leftStick != null && leftStick.isEnabled()) manualArm.setChecked(false);
+    }
+
     @Override protected void onStart() {
         super.onStart();
         started = true;
+        startFlightSessionIfConnected();
     }
 
     @Override protected void onStop() {

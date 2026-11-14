@@ -11,6 +11,7 @@ import android.bluetooth.BluetoothStatusCodes;
 import android.content.Context;
 import android.net.ConnectivityManager;
 import android.net.MacAddress;
+import android.net.LinkProperties;
 import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.net.NetworkRequest;
@@ -217,6 +218,12 @@ final class DroneConnection {
             wifi = new ConnectivityManager.NetworkCallback() {
                 @Override public void onAvailable(Network network) {
                     if (wifi != this) return;
+                    status.accept("Waiting for drone Wi-Fi network settings…");
+                }
+
+                @Override public void onLinkPropertiesChanged(Network network, LinkProperties properties) {
+                    if (wifi != this || droneNetwork != null || properties.getLinkAddresses().stream()
+                            .noneMatch(address -> address.getAddress() instanceof java.net.Inet4Address)) return;
                     droneNetwork = network;
                     status.accept("Drone Wi-Fi connected.");
                 }
