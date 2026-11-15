@@ -1,6 +1,8 @@
 package dev.freeneo.app;
 
 import android.media.MediaCodec;
+import android.os.Handler;
+import android.os.HandlerThread;
 import android.media.MediaFormat;
 import android.view.Surface;
 
@@ -12,6 +14,7 @@ final class AndroidPreview implements AutoCloseable {
     private record Chunk(byte[] bytes, long receivedNanos) {}
     private final ArrayBlockingQueue<Chunk> input = new ArrayBlockingQueue<>(192);
     private final Surface surface;
+    private record Picture(byte[] bytes, long receivedNanos) {}
     private volatile boolean closed;
     private volatile long renderedNanos;
     private volatile String status = "Waiting for live video";
@@ -30,10 +33,16 @@ final class AndroidPreview implements AutoCloseable {
             && System.nanoTime() - renderedNanos < 500_000_000L;
     }
 
-    String status() { return fresh() ? "Live video" : status; }
+    String status() {
+        if (fresh()) return "Live video";
+        if (closed || renderedNanos == 0) return status;
+        return "Video stalled · last frame " + (System.nanoTime() - renderedNanos) / 1_000_000 + " ms ago";
+    }
 
     private void decode() {
         MediaCodec codec = null;
+        var callbacks = new HandlerThread("neo2-render-callbacks");
+        callbacks.start();
         try {
             MediaCodec decoder = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_HEVC);
             codec = decoder;
@@ -43,20 +52,28 @@ final class AndroidPreview implements AutoCloseable {
             decoder.setOnFrameRenderedListener((source, presentationUs, renderedAt) -> {
                 long captureNanos = presentationUs * 1000;
                 if (!closed && captureNanos > renderedNanos) renderedNanos = captureNanos;
-            }, new android.os.Handler(android.os.Looper.getMainLooper()));
+            }, new Handler(callbacks.getLooper()));
             decoder.start();
+            var pictures = new java.util.ArrayDeque<Picture>();
             var units = new HevcAccessUnits((bytes, timestamp) -> {
-                int slot = decoder.dequeueInputBuffer(20_000);
-                if (slot < 0) throw new IllegalStateException("Video decoder input unavailable");
-                var buffer = decoder.getInputBuffer(slot);
-                if (buffer == null || buffer.remaining() < bytes.length) throw new IllegalStateException("Video input too large");
-                buffer.put(bytes);
-                decoder.queueInputBuffer(slot, 0, bytes.length, timestamp / 1000, 0);
+                if (pictures.size() >= 8) throw new IllegalStateException("Video decoder backlog");
+                pictures.addLast(new Picture(bytes, timestamp));
             });
             var info = new MediaCodec.BufferInfo();
             while (!closed) {
-                Chunk chunk = input.poll(10, TimeUnit.MILLISECONDS);
+                Chunk chunk = input.poll(pictures.isEmpty() ? 10 : 2, TimeUnit.MILLISECONDS);
                 if (chunk != null) units.feed(chunk.bytes(), chunk.receivedNanos());
+                while (!pictures.isEmpty()) {
+                    int slot = decoder.dequeueInputBuffer(0);
+                    if (slot < 0) break;
+                    Picture picture = pictures.removeFirst();
+                    var buffer = decoder.getInputBuffer(slot);
+                    if (buffer == null || buffer.remaining() < picture.bytes().length) {
+                        throw new IllegalStateException("Video input too large");
+                    }
+                    buffer.put(picture.bytes());
+                    decoder.queueInputBuffer(slot, 0, picture.bytes().length, picture.receivedNanos() / 1000, 0);
+                }
                 for (int slot; (slot = decoder.dequeueOutputBuffer(info, 0)) >= 0;) {
                     boolean fresh = System.nanoTime() - info.presentationTimeUs * 1000 < 500_000_000L;
                     decoder.releaseOutputBuffer(slot, fresh && info.size > 0);
@@ -67,6 +84,7 @@ final class AndroidPreview implements AutoCloseable {
         } catch (InterruptedException error) {
             Thread.currentThread().interrupt();
         } finally {
+            callbacks.quitSafely();
             if (codec != null) codec.release();
         }
     }

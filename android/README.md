@@ -36,6 +36,12 @@ request level and 30° down respectively. A decoder error requires reopening
 the flight session. The aircraft's response to these new controls requires
 hardware verification.
 
+Turn on **Object detection** on the Flight tab to run ML Kit on the phone. It starts off so preview and controls can be tested independently. It samples the
+video at up to eight frames per second and labels up to five boxes with stream
+tracking IDs. IDs reset when the preview session closes and can change after
+an object is lost. Detection runs while the Flight tab is visible. ML Kit
+may require a one-time model download before detections appear.
+
 Run the simulator, pairing, and telemetry tests with JDK 17 from this directory.
 
 ```sh
