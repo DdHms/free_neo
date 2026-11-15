@@ -25,6 +25,7 @@ import android.graphics.SurfaceTexture;
 import android.view.Surface;
 import android.view.TextureView;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -52,6 +53,12 @@ public final class MainActivity extends Activity {
     private EditText hostInput, portInput;
     private TextView telemetryStatus;
     private TextureView liveVideo;
+    private FrameLayout previewPane;
+    private ObjectOverlay objectOverlay;
+    private TextView trackingStatus;
+    private PreviewTracker tracker;
+    private Switch trackingEnabled;
+    private boolean flightSelected;
     private Surface previewSurface;
     private int previewHeight;
     private LinearLayout connectionPage, flightPage;
@@ -132,7 +139,11 @@ public final class MainActivity extends Activity {
         flightPage.setOrientation(LinearLayout.VERTICAL);
         liveVideo = new TextureView(this);
         previewHeight = Math.round(200 * getResources().getDisplayMetrics().density);
-        page.addView(liveVideo, new LinearLayout.LayoutParams(-1, 1));
+        previewPane = new FrameLayout(this);
+        previewPane.addView(liveVideo, new FrameLayout.LayoutParams(-1, -1));
+        objectOverlay = new ObjectOverlay(this);
+        previewPane.addView(objectOverlay, new FrameLayout.LayoutParams(-1, -1));
+        page.addView(previewPane, new LinearLayout.LayoutParams(-1, 1));
         page.addView(connectionPage);
         page.addView(flightPage);
         page = connectionPage;
@@ -203,9 +214,11 @@ public final class MainActivity extends Activity {
     }
 
     private void showFlightTab(boolean selected) {
-        liveVideo.getLayoutParams().height = selected ? previewHeight : 1;
-        liveVideo.setAlpha(selected ? 1f : 0f);
-        liveVideo.requestLayout();
+        flightSelected = selected;
+        previewPane.getLayoutParams().height = selected ? previewHeight : 1;
+        previewPane.setAlpha(selected ? 1f : 0f);
+        previewPane.requestLayout();
+        if (!selected) stopTracking();
         if (!selected && manualArm != null) manualArm.setChecked(false);
         connectionPage.setVisibility(selected ? android.view.View.GONE : android.view.View.VISIBLE);
         flightPage.setVisibility(selected ? android.view.View.VISIBLE : android.view.View.GONE);
@@ -227,7 +240,15 @@ public final class MainActivity extends Activity {
         probe.setPreview(preview);
     }
 
+    private void stopTracking() {
+        if (tracker != null) tracker.close();
+        tracker = null;
+        if (trackingStatus != null) trackingStatus.setText(trackingEnabled.isChecked()
+            ? "Waiting for video to track objects." : "Object detection off.");
+    }
+
     private void detachPreview() {
+        stopTracking();
         if (probe != null) probe.setPreview(null);
         if (preview != null) preview.close();
         preview = null;
@@ -243,12 +264,24 @@ public final class MainActivity extends Activity {
                 startFlightSessionIfConnected();
             }
             @Override public void onSurfaceTextureSizeChanged(SurfaceTexture texture, int width, int height) {}
-            @Override public void onSurfaceTextureUpdated(SurfaceTexture texture) {}
+            @Override public void onSurfaceTextureUpdated(SurfaceTexture texture) {
+                if (!flightSelected || !trackingEnabled.isChecked() || preview == null || !preview.fresh()) return;
+                if (tracker == null) tracker = new PreviewTracker(liveVideo, objectOverlay, trackingStatus);
+                tracker.sample();
+            }
             @Override public boolean onSurfaceTextureDestroyed(SurfaceTexture texture) {
                 manualArm.setChecked(false);
                 detachPreview();
                 return true;
             }
+        });
+        trackingEnabled = new Switch(this);
+        trackingEnabled.setText("Object detection");
+        page.addView(trackingEnabled);
+        trackingStatus = label(page, "Object detection off.");
+        trackingEnabled.setOnCheckedChangeListener((view, enabled) -> {
+            if (enabled) trackingStatus.setText("Waiting for video to track objects.");
+            else stopTracking();
         });
         manualArm = new Switch(this);
         manualArm.setText("Arm manual movement");
