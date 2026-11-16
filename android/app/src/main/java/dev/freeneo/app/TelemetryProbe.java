@@ -29,13 +29,17 @@ final class TelemetryProbe implements AutoCloseable {
     private volatile AndroidPreview preview;
     private record StickInput(ManualControl axes, long at) {}
     private volatile StickInput stickInput;
-    private record FollowInput(TargetFraming.Correction correction, long at) {}
+    private static final long FOLLOW_FREEZE_GRACE_MS = 750;
+    private static final int FOLLOW_TILT_STEP_DEGREES = 3;
+    private record FollowInput(TargetFraming.Correction correction, long at, long sampledAt) {}
     private volatile FollowInput followInput;
     private long lastFollowSend = -10_000;
 
-    void follow(TargetFraming.Correction correction) {
-        followInput = correction == null ? null : new FollowInput(correction, SystemClock.elapsedRealtime());
+    void follow(TargetFraming.Correction correction, long sampledAt) {
+        followInput = new FollowInput(correction, SystemClock.elapsedRealtime(), sampledAt);
     }
+
+    void stopFollow() { followInput = null; }
     private volatile boolean movementReady;
     private final java.util.concurrent.atomic.AtomicBoolean manualArmed = new java.util.concurrent.atomic.AtomicBoolean();
 
@@ -71,6 +75,14 @@ final class TelemetryProbe implements AutoCloseable {
     private long lastFlight = -10_000, lastBattery = -10_000;
     private boolean flying, motorsOn;
     private int battery;
+    private record BatteryReading(int percent, long at) {}
+    private volatile BatteryReading batteryReading;
+
+    int batteryPercent() {
+        BatteryReading reading = batteryReading;
+        return reading != null && SystemClock.elapsedRealtime() - reading.at() <= BATTERY_MAX_AGE_MS
+            ? reading.percent() : -1;
+    }
 
     TelemetryProbe(Network network, InetAddress host, int port, String identity, Mode mode, Consumer<String> status,
                    Consumer<LiveFlight.Controls> controls, AndroidPreview preview) {
@@ -91,7 +103,7 @@ final class TelemetryProbe implements AutoCloseable {
         manualArmed.set(allowed);
         if (!allowed) {
             sticks(null);
-            follow(null);
+            stopFollow();
         }
         return allowed;
     }
@@ -149,6 +161,7 @@ final class TelemetryProbe implements AutoCloseable {
                 @Override public void battery(int percent) {
                     battery = percent;
                     lastBattery = SystemClock.elapsedRealtime();
+                    batteryReading = new BatteryReading(percent, lastBattery);
                 }
             });
         protocol.enableCapabilityRead(identity);
@@ -167,7 +180,8 @@ final class TelemetryProbe implements AutoCloseable {
             long nextOpen = start, nextAck = start, nextStatus = start;
             long nextHeartbeat = start + 800, nextPresence = start;
             boolean wasMoving = false;
-            long nextMovement = start, nextTilt = start;
+            long followFreezeAt = -1;
+            long nextMovement = start, nextTilt = start, lastTiltCommandAt = -1;
             int commandedPitch = 0;
             int opens = 0, presenceCounter = 0;
             int presenceNonce = random.nextInt(1, 65536);
@@ -209,13 +223,23 @@ final class TelemetryProbe implements AutoCloseable {
                                     protocol.commandReady(now), now);
                             if (command == null) {
                                 boolean routeReady = protocol.commandReady(now);
-                                boolean manualReady = preview != null && preview.fresh()
-                                    && now - lastBattery <= BATTERY_MAX_AGE_MS && battery >= 20
+                                boolean flightReady = now - lastBattery <= BATTERY_MAX_AGE_MS && battery >= 20
                                     && flight.controls(routeReady, now).land();
+                                boolean videoFresh = preview != null && preview.fresh();
+                                boolean manualReady = flightReady && videoFresh;
                                 StickInput stick = stickInput;
                                 var follow = followInput;
-                                var correction = manualReady && manualArmed.get() && stick == null
-                                    && follow != null && now - follow.at() < 120 ? follow.correction() : null;
+                                boolean followActive = flightReady && manualArmed.get() && stick == null
+                                    && follow != null && now - follow.at() < 120;
+                                if (!videoFresh) movementReady = false;
+                                if (!followActive) followFreezeAt = -1;
+                                else if (!videoFresh && followFreezeAt < 0) followFreezeAt = now;
+                                boolean freezeExpired = followFreezeAt >= 0
+                                    && now - followFreezeAt >= FOLLOW_FREEZE_GRACE_MS;
+                                var correction = manualReady && followActive && !freezeExpired
+                                    && follow.sampledAt() > followFreezeAt && now - follow.sampledAt() < 300
+                                    ? follow.correction() : null;
+                                if (correction != null) followFreezeAt = -1;
                                 ManualControl axes = ManualControl.NEUTRAL;
                                 if (manualReady && manualArmed.get() && stick != null && now - stick.at() < 150) {
                                     axes = stick.axes();
@@ -224,13 +248,17 @@ final class TelemetryProbe implements AutoCloseable {
                                 }
                                 boolean moving = !axes.equals(ManualControl.NEUTRAL);
                                 Integer pitch = cameraPitch.getAndSet(null);
-                                if (pitch == null && correction != null && correction.tilt() != 0 && now >= nextTilt) {
-                                    int adjusted = Math.max(-30, Math.min(0, commandedPitch + correction.tilt() * 10));
+                                if (pitch == null && correction != null && correction.tilt() != 0
+                                        && now >= nextTilt && follow.sampledAt() > lastTiltCommandAt) {
+                                    int adjusted = Math.max(-30, Math.min(0,
+                                        commandedPitch + correction.tilt() * FOLLOW_TILT_STEP_DEGREES));
                                     if (adjusted != commandedPitch) pitch = adjusted;
                                 }
-                                if (!manualReady) {
+                                boolean waitingForVideo = followActive && followFreezeAt >= 0 && !freezeExpired;
+                                if (freezeExpired || (!manualReady && !waitingForVideo)) {
                                     movementReady = false;
                                     armMovement(false);
+                                    followFreezeAt = -1;
                                 }
                                 boolean sentMovement = routeReady && (moving ? now >= nextMovement : wasMoving);
                                 if (sentMovement) {
@@ -244,6 +272,7 @@ final class TelemetryProbe implements AutoCloseable {
                                         reportSequence++ & 0xffff), now));
                                     if (correction != null) lastFollowSend = now;
                                     commandedPitch = pitch;
+                                    lastTiltCommandAt = now;
                                     nextTilt = now + 350;
                                 }
                                 var record = recordingIntent.getAndSet(null);
@@ -263,6 +292,7 @@ final class TelemetryProbe implements AutoCloseable {
                             }
                             else {
                                 armMovement(false);
+                                followFreezeAt = -1;
                                 wasMoving = false;
                                 if (command.action() == FlightCommand.Action.LAND) {
                                     send(link, protocol.flightDatagram(FlightCommand.neutral(reportSequence & 0xffff), now));
@@ -296,7 +326,7 @@ final class TelemetryProbe implements AutoCloseable {
                     }
                     if (protocol.accepted()) status.accept(summary(now) + "\n" + capabilityStatus(protocol.capabilityState(now))
                         + (mode != Mode.READ ? serviceStatus(protocol.serviceState(now)) : "")
-                        + (mode == Mode.LIVE ? manualStatus(protocol.commandReady(now), now) : "") + "\n" + endpoint + (preview == null ? "" : "\n" + preview.status()));
+                        + (mode == Mode.LIVE ? manualStatus(protocol.commandReady(now), now) : "") + (preview == null ? "" : "\n" + preview.status()));
                     nextStatus = now + 250;
                 }
                 try {
@@ -309,10 +339,10 @@ final class TelemetryProbe implements AutoCloseable {
                 }
             }
             if (!closed) {
-                if (!protocol.accepted()) status.accept("No DJI session response from " + endpoint + ".");
+                if (!protocol.accepted()) status.accept("No response from the drone’s DJI session.");
                 else if (mode == Mode.CHECK_SERVICE) {
                     long now = SystemClock.elapsedRealtime();
-                    status.accept("Service check ended at " + endpoint + ".\n" + summary(now) + "\n"
+                    status.accept("Service check ended.\n" + summary(now) + "\n"
                         + capabilityStatus(protocol.capabilityState(now)) + serviceStatus(protocol.serviceState(now)));
                 }
                 else if (lastFlight < 0 && lastBattery < 0) status.accept("DJI session accepted. No telemetry received.");
@@ -322,8 +352,8 @@ final class TelemetryProbe implements AutoCloseable {
             if (!closed) {
                 Log.w("FreeNeo", "Failed " + step + " at " + endpoint, error);
                 String detail = error instanceof PortUnreachableException
-                    ? "UDP port unreachable" : error.getClass().getSimpleName() + ": " + error.getMessage();
-                status.accept("Failed " + step + " at " + endpoint + ".\n" + detail
+                    ? "Aircraft did not respond on Wi-Fi." : error.getClass().getSimpleName();
+                status.accept("Failed " + step + ".\n" + detail
                     + (mode == Mode.LIVE && protocol.accepted()
                         ? "\nCheck the aircraft using independent controls." : ""));
             }

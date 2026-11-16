@@ -8,27 +8,23 @@ import android.os.SystemClock;
 import android.view.MotionEvent;
 import android.widget.TextView;
 
-import com.google.mlkit.vision.objects.DetectedObject;
-
 import java.util.List;
 
 final class ObjectOverlay extends View {
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private List<DetectedObject> objects = List.of();
+    private List<SubjectTracks.Track> objects = List.of();
 
     private final TargetFraming framing = new TargetFraming();
     private final TargetAssociation association = new TargetAssociation();
     private TargetAssociation.Box matched;
     private boolean matchVisible;
+    private long sampledAt = -1;
     private TextView framingStatus;
 
-    private static TargetAssociation.Box box(DetectedObject object) {
-        var bounds = object.getBoundingBox();
-        return new TargetAssociation.Box(object.getTrackingId(), bounds.left, bounds.top,
-            bounds.right, bounds.bottom);
-    }
+    private SubjectTracks.Kind selectedKind;
 
     TargetFraming framing() { return framing; }
+    long sampledAt() { return sampledAt; }
 
     void setStatusView(TextView status) {
         framingStatus = status;
@@ -50,11 +46,12 @@ final class ObjectOverlay extends View {
         setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
     }
 
-    void show(List<DetectedObject> objects) {
+    void show(List<SubjectTracks.Track> objects, long sampledAt) {
         this.objects = objects;
+        this.sampledAt = sampledAt;
         long now = SystemClock.elapsedRealtime();
-        var candidates = objects.stream().filter(object -> object.getTrackingId() != null)
-            .map(ObjectOverlay::box).filter(box -> box.area() > 0).collect(java.util.stream.Collectors.toList());
+        var candidates = objects.stream().filter(object -> object.kind() == selectedKind)
+            .map(SubjectTracks.Track::box).collect(java.util.stream.Collectors.toList());
         var selected = association.match(candidates, now);
         matchVisible = selected != null;
         if (selected != null) {
@@ -64,7 +61,7 @@ final class ObjectOverlay extends View {
                 (selected.top() + selected.bottom()) / (2 * PreviewTracker.HEIGHT) - .5,
                 Math.sqrt(selected.area()),
                 selected.left() <= 0 || selected.top() <= 0 || selected.right() >= PreviewTracker.WIDTH
-                    || selected.bottom() >= PreviewTracker.HEIGHT, now);
+                    || selected.bottom() >= PreviewTracker.HEIGHT, sampledAt, now);
         } else framing.missing(now);
         updateStatus();
         invalidate();
@@ -73,8 +70,9 @@ final class ObjectOverlay extends View {
     void endTrackingSession() {
         association.reset();
         matched = null;
+        selectedKind = null;
         framing.lose();
-        show(List.of());
+        show(List.of(), -1);
     }
 
     @Override public boolean onTouchEvent(MotionEvent event) {
@@ -83,11 +81,13 @@ final class ObjectOverlay extends View {
             int x = (int) (event.getX() * PreviewTracker.WIDTH / getWidth());
             int y = (int) (event.getY() * PreviewTracker.HEIGHT / getHeight());
             for (var object : objects) {
-                if (object.getTrackingId() != null && object.getBoundingBox().contains(x, y)) {
-                    framing.select(object.getTrackingId());
-                    matched = box(object);
+                var box = object.box();
+                if (x >= box.left() && x < box.right() && y >= box.top() && y < box.bottom()) {
+                    framing.select(box.id());
+                    selectedKind = object.kind();
+                    matched = box;
                     association.select(matched, SystemClock.elapsedRealtime());
-                    show(objects);
+                    show(objects, sampledAt);
                     onTargetSelected.run();
                     performClick();
                     break;
@@ -107,16 +107,15 @@ final class ObjectOverlay extends View {
         paint.setTextSize(14 * density);
         paint.setStrokeWidth(2 * density);
         for (var object : objects) {
-            var id = object.getTrackingId();
-            if (id == null) continue;
-            var box = object.getBoundingBox();
-            float x = box.left * sx, y = box.top * sy;
+            var box = object.box();
+            int id = box.id();
+            float x = box.left() * sx, y = box.top() * sy;
             boolean selected = matchVisible && matched != null && id == matched.id();
             paint.setColor(selected ? 0xffffcf62 : 0xff79ffca);
             paint.setStyle(Paint.Style.STROKE);
-            canvas.drawRect(x, y, box.right * sx, box.bottom * sy, paint);
+            canvas.drawRect(x, y, box.right() * sx, box.bottom() * sy, paint);
             paint.setStyle(Paint.Style.FILL);
-            String label = "#" + (selected ? framing.id() : id);
+            String label = object.kind().label + " #" + (selected ? framing.id() : id);
             float baseline = Math.max(18 * density, y);
             canvas.drawRect(x, baseline - 18 * density, x + paint.measureText(label) + 8 * density,
                 baseline, paint);

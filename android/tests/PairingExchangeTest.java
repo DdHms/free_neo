@@ -43,6 +43,16 @@ public final class PairingExchangeTest implements PairingExchange.Listener {
         exchange.receive(reply(0x0e, 2, 0, 8, 't', 'e', 's', 't', 'p', 'a', 's', 's'));
         check(test.credentials && test.writes.size() == 5);
 
+        var returning = new PairingExchangeTest();
+        exchange = new PairingExchange("0123456789abcdef0123456789abcdef", 10, returning);
+        exchange.start();
+        exchange.receive(reply(0x45, 10, 0, 1));
+        check(!returning.prompt && returning.writes.size() == 2 && returning.writes.get(1)[10] == 0x0c);
+        exchange.receive(reply(0x0c, 11, 0, 2, 1, 2, 3, 4, 5));
+        exchange.receive(reply(0x07, 12, 0, 3, 'N', 'E', 'O'));
+        exchange.receive(reply(0x0e, 13, 0, 8, 't', 'e', 's', 't', 'p', 'a', 's', 's'));
+        check(returning.credentials && !returning.prompt);
+
         var denied = new PairingExchangeTest();
         exchange = new PairingExchange("0123456789abcdef0123456789abcdef", 1, denied);
         exchange.start();

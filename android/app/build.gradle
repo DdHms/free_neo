@@ -12,6 +12,9 @@ android {
         versionCode 1
         versionName '0.1.0'
     }
+    sourceSets.main.assets.srcDir('../../models')
+    androidResources.noCompress += 'tflite'
+
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
@@ -19,5 +22,5 @@ android {
 }
 
 dependencies {
-    implementation 'com.google.mlkit:object-detection:17.0.2'
+    implementation 'org.tensorflow:tensorflow-lite:2.16.1'
 }

@@ -3,6 +3,7 @@ package dev.freeneo.app;
 import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Paint;
+import android.util.TypedValue;
 import android.view.MotionEvent;
 import android.view.View;
 
@@ -11,22 +12,43 @@ import java.util.function.BiConsumer;
 final class ManualStick extends View {
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final BiConsumer<Integer, Integer> input;
+    private final String top, bottom, left, right;
+    private boolean overVideo;
     private int pointer = -1;
     private float x, y;
 
-    ManualStick(Context context, String description, BiConsumer<Integer, Integer> input) {
+    ManualStick(Context context, String description, String top, String bottom,
+                String left, String right, BiConsumer<Integer, Integer> input) {
         super(context);
         setContentDescription(description);
         this.input = input;
+        this.top = top;
+        this.bottom = bottom;
+        this.left = left;
+        this.right = right;
     }
 
     @Override protected void onDraw(Canvas canvas) {
         float cx = getWidth() / 2f, cy = getHeight() / 2f;
         float r = radius();
-        paint.setColor(isEnabled() ? 0xffdbe5ed : 0xffeeeeee);
+        paint.setColor(overVideo ? 0x9911191d : isEnabled() ? 0xffe2ece9 : 0xffe7ebec);
         canvas.drawCircle(cx, cy, r, paint);
-        paint.setColor(isEnabled() ? 0xff284f67 : 0xff888888);
+        paint.setColor(overVideo ? 0xfff7faf9 : 0xff415355);
+        paint.setTextAlign(Paint.Align.CENTER);
+        float textSize = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, 13,
+            getResources().getDisplayMetrics());
+        paint.setTextSize(Math.min(r * .16f, textSize));
+        canvas.drawText(top, cx, cy - r * .62f, paint);
+        canvas.drawText(bottom, cx, cy + r * .74f, paint);
+        canvas.drawText(left, cx - r * .61f, cy + paint.getTextSize() / 3, paint);
+        canvas.drawText(right, cx + r * .61f, cy + paint.getTextSize() / 3, paint);
+        paint.setColor(isEnabled() ? 0xff007b67 : overVideo ? 0x99ffffff : 0xffa2b0b3);
         canvas.drawCircle(cx + x * r, cy - y * r, r / 4, paint);
+    }
+
+    void setOverVideo(boolean overVideo) {
+        this.overVideo = overVideo;
+        invalidate();
     }
 
     private float radius() { return Math.max(1, Math.min(getWidth(), getHeight()) * .42f); }
