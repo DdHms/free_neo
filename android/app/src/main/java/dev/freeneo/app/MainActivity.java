@@ -70,7 +70,7 @@ public final class MainActivity extends Activity {
     private TextView followStatus;
     private int followRevision;
     private ManualStick leftStick, rightStick;
-    private Button cameraUp, cameraDown;
+    private Button cameraUp, cameraDown, recordVideo;
     private AndroidPreview preview;
     private int right, forward, up, yaw;
     private final Runnable publishSticks = new Runnable() {
@@ -340,6 +340,11 @@ public final class MainActivity extends Activity {
         sticks.addView(leftStick, new LinearLayout.LayoutParams(0, size, 1));
         sticks.addView(rightStick, new LinearLayout.LayoutParams(0, size, 1));
         label(page, "Left stick · climb and rotate   Right stick · translate");
+        recordVideo = button(page, "Record on drone", () -> {
+            if (probe != null) probe.toggleRecording();
+        });
+        recordVideo.setBackgroundTintList(android.content.res.ColorStateList.valueOf(0xffb91c1c));
+        recordVideo.setTextColor(android.graphics.Color.WHITE);
         cameraUp = button(page, "Camera up", () -> { if (probe != null) probe.camera(0); });
         cameraDown = button(page, "Camera down", () -> { if (probe != null) probe.camera(-30); });
         leftStick.setEnabled(false);
@@ -461,6 +466,8 @@ public final class MainActivity extends Activity {
         boolean allowArm = controls.land() && videoFresh && probe != null && probe.movementReady();
         if (!allowArm) manualArm.setChecked(false);
         manualArm.setEnabled(allowArm);
+        recordVideo.setEnabled(probe != null && probe.recordingReady());
+        recordVideo.setText(probe == null ? "Record on drone" : probe.recordingStatus());
         cameraUp.setEnabled(videoFresh);
         cameraDown.setEnabled(videoFresh);
     }

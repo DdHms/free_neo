@@ -45,6 +45,24 @@ final class TelemetryProbe implements AutoCloseable {
 
     boolean movementReady() { return movementReady; }
     private final AtomicReference<Integer> cameraPitch = new AtomicReference<>();
+    private record RecordingIntent(boolean start, long at) {}
+    private final AtomicReference<RecordingIntent> recordingIntent = new AtomicReference<>();
+    private volatile boolean recordReady, recordingRequested;
+    private volatile String recordingStatus = "Camera recording unavailable";
+    private int pendingRecordSequence = -1;
+    private boolean pendingRecordStart;
+    private long recordingDeadline;
+
+    boolean recordingReady() { return recordReady && !closed; }
+    String recordingStatus() { return recordingStatus; }
+
+    void toggleRecording() {
+        if (recordingReady()) {
+            recordingIntent.compareAndSet(null,
+                new RecordingIntent(!recordingRequested, SystemClock.elapsedRealtime()));
+        }
+    }
+
     private final LiveFlight flight = new LiveFlight();
     private final AtomicReference<Intent> intent = new AtomicReference<>();
     private final Consumer<String> status;
@@ -113,6 +131,17 @@ final class TelemetryProbe implements AutoCloseable {
                 @Override public void video(byte[] payload, long receivedNanos) {
                     var current = preview;
                     if (current != null) current.offer(payload, receivedNanos);
+                }
+
+                @Override public void recordingReply(int sequence, int result) {
+                    if (sequence != pendingRecordSequence || SystemClock.elapsedRealtime() >= recordingDeadline) return;
+                    pendingRecordSequence = -1;
+                    if (result == 0) {
+                        recordingRequested = pendingRecordStart;
+                        recordingStatus = pendingRecordStart ? "Stop recording" : "Record on drone";
+                    } else {
+                        recordingStatus = pendingRecordStart ? "Retry recording start" : "Retry recording stop";
+                    }
                 }
 
                 @Override public void flightReply(byte[] frame) { flight.reply(frame); }
@@ -217,7 +246,20 @@ final class TelemetryProbe implements AutoCloseable {
                                     commandedPitch = pitch;
                                     nextTilt = now + 350;
                                 }
-                                if (!sentMovement && pitch == null) send(link, protocol.acknowledge());
+                                var record = recordingIntent.getAndSet(null);
+                                boolean sentRecording = record != null && routeReady && pendingRecordSequence < 0
+                                    && now - record.at() < 250;
+                                if (sentRecording) {
+                                    pendingRecordSequence = reportSequence++ & 0xffff;
+                                    pendingRecordStart = record.start();
+                                    recordingDeadline = now + 1500;
+                                    recordingStatus = record.start() ? "Starting recording…" : "Stopping recording…";
+                                    recordReady = false;
+                                    byte[] frame = PairingExchange.frame(2, 1, pendingRecordSequence, 0x40, 2, 2,
+                                        new byte[] {(byte) (record.start() ? 1 : 0)});
+                                    send(link, protocol.flightDatagram(frame, now));
+                                }
+                                if (!sentMovement && pitch == null && !sentRecording) send(link, protocol.acknowledge());
                             }
                             else {
                                 armMovement(false);
@@ -240,6 +282,16 @@ final class TelemetryProbe implements AutoCloseable {
                         var available = flight.controls(protocol.commandReady(now), now);
                         movementReady = available.land() && preview != null && preview.fresh()
                             && now - lastBattery <= BATTERY_MAX_AGE_MS && battery >= 20;
+                        if (pendingRecordSequence >= 0 && now >= recordingDeadline) {
+                            pendingRecordSequence = -1;
+                            // A start may have reached the drone even when the reply was lost.
+                            recordingRequested = true;
+                            recordingStatus = "Recording uncertain · Send stop";
+                        }
+                        recordReady = protocol.commandReady(now) && pendingRecordSequence < 0;
+                        if (recordReady && recordingStatus.equals("Camera recording unavailable")) {
+                            recordingStatus = "Record on drone";
+                        }
                         controls.accept(available);
                     }
                     if (protocol.accepted()) status.accept(summary(now) + "\n" + capabilityStatus(protocol.capabilityState(now))
