@@ -3,6 +3,11 @@ package dev.freeneo.app;
 final class TargetFraming {
     private Integer id;
     private static final long REACQUIRE_MS = 750;
+    private static final long MAX_OBSERVATION_AGE_MS = 300;
+    private static final double TILT_DEADBAND = .06;
+    private static final int TILT_CONFIRMATIONS = 3;
+    private int tiltDirection, tiltConfirmations;
+    private long lastTiltSample = -1;
     private boolean lost;
     private long missingSince = -1;
     private double x, y, size, reference;
@@ -22,10 +27,13 @@ final class TargetFraming {
         missingSince = -1;
         samples = 0;
         reference = 0;
+        lastTiltSample = -1;
+        tiltConfirmations = 0;
     }
 
     void reassociate() {
         revision++;
+        tiltConfirmations = 0;
     }
 
     Integer id() { return id; }
@@ -39,11 +47,12 @@ final class TargetFraming {
         if (id == null || lost) return;
         if (missingSince < 0) {
             missingSince = now;
+            tiltConfirmations = 0;
         }
         if (now - missingSince >= REACQUIRE_MS) lose();
     }
 
-    boolean update(double cx, double cy, double scale, boolean clipped, long now) {
+    boolean update(double cx, double cy, double scale, boolean clipped, long sampledAt, long now) {
         if (missingSince >= 0) missing(now);
         if (id == null || lost) return false;
         missingSince = -1;
@@ -54,17 +63,26 @@ final class TargetFraming {
         size += weight * (scale - size);
         samples++;
         observedAt = now;
+        if (sampledAt > lastTiltSample) {
+            int direction = tiltDirection(cy);
+            if (direction == 0 || direction != tiltDirection
+                    || sampledAt - lastTiltSample >= MAX_OBSERVATION_AGE_MS) tiltConfirmations = 0;
+            if (direction != 0 && tiltConfirmations < TILT_CONFIRMATIONS) tiltConfirmations++;
+            tiltDirection = direction;
+            lastTiltSample = sampledAt;
+        }
         return true;
     }
 
     void setSize(long now) {
-        if (!lost && missingSince < 0 && samples >= 3 && sizeReliable && now - observedAt < 300) reference = size;
+        if (!lost && missingSince < 0 && samples >= 3 && sizeReliable && now - observedAt < MAX_OBSERVATION_AGE_MS) reference = size;
     }
 
     Correction correction(long now, boolean keepSize) {
-        if (id == null || lost || missingSince >= 0 || samples < 3 || now - observedAt >= 300) return null;
+        if (id == null || lost || missingSince >= 0 || samples < 3 || now - observedAt >= MAX_OBSERVATION_AGE_MS) return null;
         int yaw = Math.abs(x) <= .04 ? 0 : (int) Math.round(Math.max(-690, Math.min(690, 2300 * x)));
-        int tilt = Math.abs(y) <= .06 ? 0 : y < 0 ? 1 : -1;
+        int tilt = tiltConfirmations >= TILT_CONFIRMATIONS && tiltDirection(y) == tiltDirection
+            && now - lastTiltSample < MAX_OBSERVATION_AGE_MS ? tiltDirection : 0;
         int forward = 0;
         if (keepSize && reference > 0 && sizeReliable && Math.abs(x) <= .10 && Math.abs(y) <= .10) {
             double error = 1 - size / reference;
@@ -86,6 +104,10 @@ final class TargetFraming {
         if (!sizeReliable || Math.abs(x) > .15 || Math.abs(y) > .15) return framing + " · Size cue paused";
         double error = size / reference - 1;
         return framing + " · " + (error < -.08 ? "Move closer" : error > .08 ? "Move farther" : "Size held");
+    }
+
+    private static int tiltDirection(double verticalOffset) {
+        return Math.abs(verticalOffset) <= TILT_DEADBAND ? 0 : verticalOffset < 0 ? 1 : -1;
     }
 
     private static String direction(double error, String negative, String positive) {
