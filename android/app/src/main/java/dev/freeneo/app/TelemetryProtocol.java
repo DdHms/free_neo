@@ -14,6 +14,7 @@ final class TelemetryProtocol {
         default void flightEvidence(boolean flying, boolean motorsOn) {}
         default void landingConfirmation(boolean needed) {}
         default void video(byte[] payload, long receivedNanos) {}
+        default void recordingReply(int sequence, int result) {}
         default void flightReply(byte[] frame) {}
     }
 
@@ -300,7 +301,7 @@ final class TelemetryProtocol {
     }
 
     private void inspect(byte[] frame) {
-        inspectFlightReply(frame);
+        inspectCommandReply(frame);
 
         if (frame[4] == 7 && frame[5] == 2 && frame[9] == 7 && u(frame[10]) == 0x94
                 && frame.length >= 44 && (frame[11] & 31) != 0 && frame[14] == 2) {
@@ -325,7 +326,7 @@ final class TelemetryProtocol {
             }
             if (commandReady(now) && (capabilities.fromBoundPeer(source, destination)
                     || (destination == -1 && capabilities.fromBoundBroadcast(source)))) {
-                inspectFlightReply(frame);
+                inspectCommandReply(frame);
             }
             if (destination != -1 || !plaintextPush(frame[8])) return;
             boundBroadcast = capabilities != null && capabilities.fromBoundBroadcast(source);
@@ -352,7 +353,11 @@ final class TelemetryProtocol {
         }
     }
 
-    private void inspectFlightReply(byte[] frame) {
+    private void inspectCommandReply(byte[] frame) {
+        if (frame.length >= 14 && frame[4] == 1 && frame[5] == 2 && frame[9] == 2 && frame[10] == 2
+                && (u(frame[8]) == 0x80 || u(frame[8]) == 0xc0) && commandReady(now)) {
+            observer.recordingReply(word(frame, 6), u(frame[11]));
+        }
         if (frame[4] == 3 && frame[5] == 2 && frame[9] == 3 && frame[10] == 0x2a
                 && commandReady(now)) observer.flightReply(frame);
     }
