@@ -17,3 +17,7 @@ android {
         targetCompatibility JavaVersion.VERSION_17
     }
 }
+
+dependencies {
+    implementation 'com.google.mlkit:object-detection:17.0.2'
+}

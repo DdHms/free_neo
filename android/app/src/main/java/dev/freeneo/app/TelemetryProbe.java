@@ -29,6 +29,13 @@ final class TelemetryProbe implements AutoCloseable {
     private volatile AndroidPreview preview;
     private record StickInput(ManualControl axes, long at) {}
     private volatile StickInput stickInput;
+    private record FollowInput(TargetFraming.Correction correction, long at) {}
+    private volatile FollowInput followInput;
+    private long lastFollowSend = -10_000;
+
+    void follow(TargetFraming.Correction correction) {
+        followInput = correction == null ? null : new FollowInput(correction, SystemClock.elapsedRealtime());
+    }
     private volatile boolean movementReady;
     private final java.util.concurrent.atomic.AtomicBoolean manualArmed = new java.util.concurrent.atomic.AtomicBoolean();
 
@@ -64,7 +71,10 @@ final class TelemetryProbe implements AutoCloseable {
     boolean armMovement(boolean armed) {
         boolean allowed = armed && movementReady && !closed;
         manualArmed.set(allowed);
-        if (!allowed) sticks(null);
+        if (!allowed) {
+            sticks(null);
+            follow(null);
+        }
         return allowed;
     }
 
@@ -128,7 +138,8 @@ final class TelemetryProbe implements AutoCloseable {
             long nextOpen = start, nextAck = start, nextStatus = start;
             long nextHeartbeat = start + 800, nextPresence = start;
             boolean wasMoving = false;
-            long nextMovement = start;
+            long nextMovement = start, nextTilt = start;
+            int commandedPitch = 0;
             int opens = 0, presenceCounter = 0;
             int presenceNonce = random.nextInt(1, 65536);
             int reportSequence = random.nextInt(1, 65533);
@@ -173,10 +184,21 @@ final class TelemetryProbe implements AutoCloseable {
                                     && now - lastBattery <= BATTERY_MAX_AGE_MS && battery >= 20
                                     && flight.controls(routeReady, now).land();
                                 StickInput stick = stickInput;
-                                ManualControl axes = manualReady && manualArmed.get() && stick != null && now - stick.at() < 150
-                                    ? stick.axes() : ManualControl.NEUTRAL;
+                                var follow = followInput;
+                                var correction = manualReady && manualArmed.get() && stick == null
+                                    && follow != null && now - follow.at() < 120 ? follow.correction() : null;
+                                ManualControl axes = ManualControl.NEUTRAL;
+                                if (manualReady && manualArmed.get() && stick != null && now - stick.at() < 150) {
+                                    axes = stick.axes();
+                                } else if (correction != null) {
+                                    axes = new ManualControl(0, correction.forward(), 0, correction.yaw());
+                                }
                                 boolean moving = !axes.equals(ManualControl.NEUTRAL);
                                 Integer pitch = cameraPitch.getAndSet(null);
+                                if (pitch == null && correction != null && correction.tilt() != 0 && now >= nextTilt) {
+                                    int adjusted = Math.max(-30, Math.min(0, commandedPitch + correction.tilt() * 10));
+                                    if (adjusted != commandedPitch) pitch = adjusted;
+                                }
                                 if (!manualReady) {
                                     movementReady = false;
                                     armMovement(false);
@@ -185,11 +207,15 @@ final class TelemetryProbe implements AutoCloseable {
                                 if (sentMovement) {
                                     nextMovement = now + 50;
                                     send(link, protocol.flightDatagram(axes.frame(reportSequence++ & 0xffff), now));
+                                    if (correction != null && moving) lastFollowSend = now;
                                 }
                                 wasMoving = moving || (wasMoving && !routeReady);
                                 if (pitch != null && routeReady && preview != null && preview.fresh()) {
                                     send(link, protocol.flightDatagram(ManualControl.cameraPitch(pitch,
                                         reportSequence++ & 0xffff), now));
+                                    if (correction != null) lastFollowSend = now;
+                                    commandedPitch = pitch;
+                                    nextTilt = now + 350;
                                 }
                                 if (!sentMovement && pitch == null) send(link, protocol.acknowledge());
                             }
@@ -265,6 +291,7 @@ final class TelemetryProbe implements AutoCloseable {
         if (preview == null || !preview.fresh()) return result + "\nManual movement requires fresh preview frames.";
         if (now - lastBattery > BATTERY_MAX_AGE_MS) return result + "\nManual movement requires a fresh battery reading.";
         if (battery < 20) return result + "\nManual movement requires at least 20% battery.";
+        if (now - lastFollowSend < 500) return result + "\nFollow command sent over Wi-Fi.";
         if (manualArmed.get()) return result + "\nManual movement armed. Hold a stick to move.";
         return result;
     }

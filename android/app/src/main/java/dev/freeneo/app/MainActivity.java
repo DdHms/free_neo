@@ -65,7 +65,10 @@ public final class MainActivity extends Activity {
     private ScrollView scroll;
     private Button connectionTab, flightTab;
     private boolean airborneTabShown;
-    private Switch manualArm;
+    private Switch manualArm, keepSize;
+    private boolean following;
+    private TextView followStatus;
+    private int followRevision;
     private ManualStick leftStick, rightStick;
     private Button cameraUp, cameraDown;
     private AndroidPreview preview;
@@ -77,7 +80,22 @@ public final class MainActivity extends Activity {
                 manualArm.setChecked(false);
                 return;
             }
-            probe.sticks(leftStick.held() || rightStick.held() ? new ManualControl(right, forward, up, yaw) : null);
+            boolean manual = leftStick.held() || rightStick.held();
+            probe.sticks(manual ? new ManualControl(right, forward, up, yaw) : null);
+            var framing = objectOverlay.framing();
+            long now = SystemClock.elapsedRealtime();
+            if (following && keepSize.isChecked() && !framing.hasSize()) framing.setSize(now);
+            var correction = framing.correction(now, keepSize.isChecked());
+            if (following && (manual || followRevision != framing.revision())) {
+                stopFollowing();
+                followStatus.setText(manual ? "Follow stopped: manual stick input." : "Follow stopped: target changed or lost.");
+            }
+            probe.follow(following ? correction : null);
+            if (following) {
+                followStatus.setText(correction == null ? "Follow paused: waiting for fresh target detection."
+                    : "Follow requested · yaw " + correction.yaw()
+                        + " · tilt " + correction.tilt() + " · forward " + correction.forward());
+            }
             handler.postDelayed(this, 40);
         }
     };
@@ -241,6 +259,7 @@ public final class MainActivity extends Activity {
     }
 
     private void stopTracking() {
+        stopFollowing();
         if (tracker != null) tracker.close();
         tracker = null;
         if (trackingStatus != null) trackingStatus.setText(trackingEnabled.isChecked()
@@ -283,6 +302,14 @@ public final class MainActivity extends Activity {
             if (enabled) trackingStatus.setText("Waiting for video to track objects.");
             else stopTracking();
         });
+        objectOverlay.setStatusView(label(page, ""));
+        keepSize = new Switch(this);
+        keepSize.setText("Keep apparent size");
+        keepSize.setChecked(true);
+        page.addView(keepSize);
+        followStatus = label(page, "Tap an object to follow.");
+        button(page, "Stop following", this::stopFollowing);
+        objectOverlay.setOnTargetSelected(this::startFollowing);
         manualArm = new Switch(this);
         manualArm.setText("Arm manual movement");
         page.addView(manualArm);
@@ -298,6 +325,7 @@ public final class MainActivity extends Activity {
                 rightStick.setEnabled(true);
                 publishSticks.run();
             } else {
+                stopFollowing();
                 leftStick.release();
                 rightStick.release();
                 leftStick.setEnabled(false);
@@ -316,6 +344,28 @@ public final class MainActivity extends Activity {
         cameraDown = button(page, "Camera down", () -> { if (probe != null) probe.camera(-30); });
         leftStick.setEnabled(false);
         rightStick.setEnabled(false);
+    }
+
+    private void startFollowing() {
+        stopFollowing();
+        if (probe == null || !manualArm.isEnabled() || leftStick.held() || rightStick.held()) {
+            followStatus.setText("Follow unavailable. Tap the target again when movement is ready.");
+            return;
+        }
+        manualArm.setChecked(true);
+        if (!probe.movementArmed()) {
+            followStatus.setText("Follow unavailable. Tap the target again when movement is ready.");
+            return;
+        }
+        followRevision = objectOverlay.framing().revision();
+        following = true;
+        followStatus.setText("Following selected object.");
+    }
+
+    private void stopFollowing() {
+        following = false;
+        if (probe != null) probe.follow(null);
+        if (followStatus != null) followStatus.setText("Follow idle.");
     }
 
     private EditText field(LinearLayout parent, String hint, int inputType) {

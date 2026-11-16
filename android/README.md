@@ -56,3 +56,10 @@ java -cp "$classes" dev.freeneo.app.ServiceCapabilitiesTest
 java -cp "$classes" dev.freeneo.app.WifiServiceSwitchTest
 java -cp "$classes" dev.freeneo.app.ManualControlTest
 ```
+
+With object detection enabled, tap a box to follow it. The tap starts follow
+when flight controls are ready. With **Keep apparent size** enabled, the app
+captures an initial size from fresh detections and uses it for forward and
+backward corrections. Switch it off for yaw and tilt only. Tap **Stop
+following** or touch a manual stick to stop. A brief detection gap pauses
+commands. A changed track ID or a lost target requires another tap.
